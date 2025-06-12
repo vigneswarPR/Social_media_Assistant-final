@@ -1,71 +1,85 @@
-# docker-compose.yml
-version: '3.8' # Use a recent version of Docker Compose file format
+version: '3.8'
 
 services:
   # Streamlit Web App Service
   streamlit:
     build:
-      context: . # Build from the current directory (where Dockerfile is)
+      context: .
       dockerfile: Dockerfile
     container_name: social_media_assistant_streamlit
     ports:
-      - "8501:8501" # Expose Streamlit app on host port 8501
+      - "8501:8501"
     volumes:
-      - .:/app # Mount your local project directory into the container for live updates (useful for dev)
-      - uploads:/app/uploads # Persist uploads
-      - logs:/app/logs     # Persist logs
+      - .:/app
+      - uploads:/app/uploads
+      - logs:/app/logs
     env_file:
-      - .env # Load environment variables from .env file
+      - .env
+    environment:
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-missing}
+      INSTAGRAM_ACCESS_TOKEN: ${INSTAGRAM_ACCESS_TOKEN:-missing}
+      INSTAGRAM_BUSINESS_ACCOUNT_ID: ${INSTAGRAM_BUSINESS_ACCOUNT_ID:-missing}
+      FACEBOOK_PAGE_ID: ${FACEBOOK_PAGE_ID:-missing}
+      FACEBOOK_APP_ID: ${FACEBOOK_APP_ID:-missing}
+      FACEBOOK_APP_SECRET: ${FACEBOOK_APP_SECRET:-missing}
+      CLOUDINARY_CLOUD_NAME: ${CLOUDINARY_CLOUD_NAME:-missing}
+      CLOUDINARY_API_KEY: ${CLOUDINARY_API_KEY:-missing}
+      CLOUDINARY_API_SECRET: ${CLOUDINARY_API_SECRET:-missing}
     depends_on:
-      - redis # Ensure Redis starts before Streamlit
-    restart: unless-stopped # Always restart unless explicitly stopped
+      - redis
+    restart: unless-stopped
 
-  # Celery Worker Service
+  # Celery Worker
   celery_worker:
     build:
-      context: . # Build from the current directory (uses the same Dockerfile)
+      context: .
       dockerfile: Dockerfile
     container_name: social_media_assistant_celery_worker
-    command: celery -A celery_app worker --loglevel=info # Command to start the Celery worker
+    command: celery -A celery_app worker --loglevel=info
     volumes:
-      - .:/app # Mount local project directory
-      - uploads:/app/uploads # Share uploads volume with streamlit
-      - logs:/app/logs     # Share logs volume with streamlit
+      - .:/app
+      - uploads:/app/uploads
+      - logs:/app/logs
     env_file:
       - .env
+    environment:
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
     depends_on:
-      - redis # Ensure Redis starts before the worker
+      - redis
     restart: unless-stopped
 
-  # Celery Beat Service (Scheduler)
+  # Celery Beat (Scheduler)
   celery_beat:
     build:
-      context: . # Build from the current directory (uses the same Dockerfile)
+      context: .
       dockerfile: Dockerfile
     container_name: social_media_assistant_celery_beat
-    command: celery -A celery_app beat --loglevel=info --schedule=/app/celerybeat-schedule # Command to start Celery Beat
+    command: celery -A celery_app beat --loglevel=info --schedule=/app/celerybeat-schedule
     volumes:
-      - .:/app # Mount local project directory
-      - uploads:/app/uploads # Share uploads volume
-      - logs:/app/logs     # Share logs volume
-      - beat_data:/app/celerybeat-schedule # Persist Celery Beat schedule state
+      - .:/app
+      - uploads:/app/uploads
+      - logs:/app/logs
+      - beat_data:/app/celerybeat-schedule
     env_file:
       - .env
+    environment:
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
     depends_on:
-      - redis # Ensure Redis starts before Celery Beat
+      - redis
     restart: unless-stopped
 
-  # Redis Service (Message Broker and Backend)
+  # Redis (Message Broker)
   redis:
-    image: "redis:7-alpine" # Use a lightweight official Redis image
+    image: redis:7-alpine
     container_name: social_media_assistant_redis
     ports:
-      - "6379:6379" # Expose Redis on host port 6379
+      - "6379:6379"
     volumes:
-      - redis_data:/data # Persist Redis data
+      - redis_data:/data
     restart: unless-stopped
 
-# Define named volumes for persistence
+# Named volumes for data persistence
 volumes:
   uploads:
   logs:
