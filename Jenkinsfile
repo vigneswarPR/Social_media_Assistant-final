@@ -148,16 +148,18 @@ pipeline {
     // Post-build actions: These steps run after all stages are complete, regardless of success or failure.
     post {
         always {
-            echo "Stopping and removing Docker Compose services after pipeline run..."
+            // echo "Stopping and removing Docker Compose services after pipeline run..."
             // This command stops containers and removes networks, volumes, and images created by 'docker compose up'.
             // This ensures a clean slate for the next build.
-            sh 'docker compose down'
+            // The 'docker compose down' command was removed from here to keep services running after successful deployment.
         }
         success {
-            echo 'Pipeline finished successfully!'
+            echo 'Pipeline finished successfully! Services should remain running.'
         }
         failure {
             echo 'Pipeline failed! Please check the console output for error details.'
+            // OPTIONAL: Consider adding 'docker compose down' here if you want to clean up ONLY on pipeline failure.
+            // sh 'docker compose down --volumes --remove-orphans'
         }
         unstable {
             echo 'Pipeline finished with some issues (e.g., skipped tests).'
