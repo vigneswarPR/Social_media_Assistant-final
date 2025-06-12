@@ -24,6 +24,9 @@ pipeline {
             steps {
                 script {
                     echo 'Cleaning up any existing Docker Compose services...'
+                    // Force remove the named Redis container if it exists from a previous run (even if stopped)
+                    // This is added to prevent "Conflict" errors during `docker compose run`
+                    sh 'docker rm -f social_media_assistant_redis || true'
                     // Stop and remove all services, networks, and volumes from previous runs.
                     // '|| true' ensures the pipeline doesn't fail if there's nothing to remove.
                     sh 'docker compose down --volumes --remove-orphans || true'
@@ -63,8 +66,6 @@ pipeline {
                     // This ensures the Streamlit container has access to necessary environment variables.
                     withCredentials([
                         string(credentialsId: 'gemini-api-key', variable: 'GEMINI_API_KEY'),
-                        string(credentialsId: 'instagram-username', variable: 'INSTAGRAM_USERNAME'),
-                        string(credentialsId: 'instagram-password', variable: 'INSTAGRAM_PASSWORD'),
                         string(credentialsId: 'instagram-access-token', variable: 'INSTAGRAM_ACCESS_TOKEN'),
                         string(credentialsId: 'instagram-business-account-id', variable: 'INSTAGRAM_BUSINESS_ACCOUNT_ID'),
                         string(credentialsId: 'facebook-page-id', variable: 'FACEBOOK_PAGE_ID'),
@@ -81,8 +82,6 @@ pipeline {
                         sh '''
                             docker compose run --rm \
                                 -e GEMINI_API_KEY=${GEMINI_API_KEY} \
-                                -e INSTAGRAM_USERNAME=${INSTAGRAM_USERNAME} \
-                                -e INSTAGRAM_PASSWORD=${INSTAGRAM_PASSWORD} \
                                 -e INSTAGRAM_ACCESS_TOKEN=${INSTAGRAM_ACCESS_TOKEN} \
                                 -e INSTAGRAM_BUSINESS_ACCOUNT_ID=${INSTAGRAM_BUSINESS_ACCOUNT_ID} \
                                 -e FACEBOOK_PAGE_ID=${FACEBOOK_PAGE_ID} \
@@ -110,8 +109,6 @@ pipeline {
                     // The 'credentialsId' MUST match the ID you gave the secret in Jenkins (e.g., 'gemini-api-key').
                     withCredentials([
                         string(credentialsId: 'gemini-api-key', variable: 'GEMINI_API_KEY'),
-                        string(credentialsId: 'instagram-username', variable: 'INSTAGRAM_USERNAME'), // Added
-                        string(credentialsId: 'instagram-password', variable: 'INSTAGRAM_PASSWORD'), // Added
                         string(credentialsId: 'instagram-access-token', variable: 'INSTAGRAM_ACCESS_TOKEN'),
                         string(credentialsId: 'instagram-business-account-id', variable: 'INSTAGRAM_BUSINESS_ACCOUNT_ID'),
                         string(credentialsId: 'facebook-page-id', variable: 'FACEBOOK_PAGE_ID'),
@@ -127,8 +124,6 @@ pipeline {
                         sh '''
                             docker compose up -d \
                                 -e GEMINI_API_KEY=${GEMINI_API_KEY} \
-                                -e INSTAGRAM_USERNAME=${INSTAGRAM_USERNAME} \
-                                -e INSTAGRAM_PASSWORD=${INSTAGRAM_PASSWORD} \
                                 -e INSTAGRAM_ACCESS_TOKEN=${INSTAGRAM_ACCESS_TOKEN} \
                                 -e INSTAGRAM_BUSINESS_ACCOUNT_ID=${INSTAGRAM_BUSINESS_ACCOUNT_ID} \
                                 -e FACEBOOK_PAGE_ID=${FACEBOOK_PAGE_ID} \
