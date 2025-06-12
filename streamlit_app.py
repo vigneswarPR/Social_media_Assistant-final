@@ -32,7 +32,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Set Streamlit layout
-st.set_page_config(layout="wide", page_title="AI Social Media")
+st.set_page_config(layout="wide", page_title="AI Social media assistance")
 
 # Initialize session state
 session_defaults = {
