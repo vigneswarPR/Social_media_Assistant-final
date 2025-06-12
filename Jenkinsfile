@@ -17,6 +17,21 @@ pipeline {
 
     // Define the stages of your pipeline.
     stages {
+        // Add a cleanup stage at the very beginning to ensure a clean Docker environment
+        // before starting any new services. This helps prevent conflicts from previous
+        // failed or incomplete runs.
+        stage('Cleanup Previous Runs') {
+            steps {
+                script {
+                    echo 'Cleaning up any existing Docker Compose services...'
+                    // Stop and remove all services, networks, and volumes from previous runs.
+                    // '|| true' ensures the pipeline doesn't fail if there's nothing to remove.
+                    sh 'docker compose down --volumes --remove-orphans || true'
+                    echo 'Cleanup complete.'
+                }
+            }
+        }
+
         // The "Declarative: Checkout SCM" stage handled by Jenkins itself at the start
         // already fetches your code. This 'Checkout Source Code' stage is redundant and
         // was causing issues by trying to fetch 'master' branch. It's now removed.
@@ -44,11 +59,41 @@ pipeline {
             steps {
                 script {
                     echo "Running tests within the 'streamlit' service container..."
-                    // This command runs 'pytest' inside the 'streamlit' container.
-                    // '--rm' ensures the temporary container is removed after the tests.
-                    // Ensure 'pytest' is included in your 'requirements.txt' and installed in your Dockerfile.
-                    // Adjust '/usr/local/bin/python -m pytest' if your test command or Python path is different.
-                    sh 'docker compose run --rm streamlit /usr/local/bin/python -m pytest'
+                    // Securely inject credentials required for tests (e.g., API keys, user credentials).
+                    // This ensures the Streamlit container has access to necessary environment variables.
+                    withCredentials([
+                        string(credentialsId: 'gemini-api-key', variable: 'GEMINI_API_KEY'),
+                        string(credentialsId: 'instagram-username', variable: 'INSTAGRAM_USERNAME'), // Added
+                        string(credentialsId: 'instagram-password', variable: 'INSTAGRAM_PASSWORD'), // Added
+                        string(credentialsId: 'instagram-access-token', variable: 'INSTAGRAM_ACCESS_TOKEN'),
+                        string(credentialsId: 'instagram-business-account-id', variable: 'INSTAGRAM_BUSINESS_ACCOUNT_ID'),
+                        string(credentialsId: 'facebook-page-id', variable: 'FACEBOOK_PAGE_ID'),
+                        string(credentialsId: 'facebook-app-id', variable: 'FACEBOOK_APP_ID'),
+                        string(credentialsId: 'facebook-app-secret', variable: 'FACEBOOK_APP_SECRET'),
+                        string(credentialsId: 'cloudinary-cloud-name', variable: 'CLOUDINARY_CLOUD_NAME'),
+                        string(credentialsId: 'cloudinary-api-key', variable: 'CLOUDINARY_API_KEY'),
+                        string(credentialsId: 'cloudinary-api-secret', variable: 'CLOUDINARY_API_SECRET')
+                    ]) {
+                        // This command runs 'pytest' inside the 'streamlit' container.
+                        // '--rm' ensures the temporary container is removed after the tests.
+                        // Environment variables from 'withCredentials' and global 'environment' are passed with -e.
+                        sh """
+                            docker compose run --rm \
+                                -e GEMINI_API_KEY=\$GEMINI_API_KEY \
+                                -e INSTAGRAM_USERNAME=\$INSTAGRAM_USERNAME \
+                                -e INSTAGRAM_PASSWORD=\$INSTAGRAM_PASSWORD \
+                                -e INSTAGRAM_ACCESS_TOKEN=\$INSTAGRAM_ACCESS_TOKEN \
+                                -e INSTAGRAM_BUSINESS_ACCOUNT_ID=\$INSTAGRAM_BUSINESS_ACCOUNT_ID \
+                                -e FACEBOOK_PAGE_ID=\$FACEBOOK_PAGE_ID \
+                                -e FACEBOOK_APP_ID=\$FACEBOOK_APP_ID \
+                                -e FACEBOOK_APP_SECRET=\$FACEBOOK_APP_SECRET \
+                                -e CLOUDINARY_CLOUD_NAME=\$CLOUDINARY_CLOUD_NAME \
+                                -e CLOUDINARY_API_KEY=\$CLOUDINARY_API_KEY \
+                                -e CLOUDINARY_API_SECRET=\$CLOUDINARY_API_SECRET \
+                                -e REDIS_URL=${REDIS_URL_FOR_CONTAINERS} \
+                                streamlit /usr/local/bin/python -m pytest
+                        """
+                    }
                     echo "Tests completed."
                 }
             }
@@ -64,6 +109,8 @@ pipeline {
                     // The 'credentialsId' MUST match the ID you gave the secret in Jenkins (e.g., 'gemini-api-key').
                     withCredentials([
                         string(credentialsId: 'gemini-api-key', variable: 'GEMINI_API_KEY'),
+                        string(credentialsId: 'instagram-username', variable: 'INSTAGRAM_USERNAME'), // Added
+                        string(credentialsId: 'instagram-password', variable: 'INSTAGRAM_PASSWORD'), // Added
                         string(credentialsId: 'instagram-access-token', variable: 'INSTAGRAM_ACCESS_TOKEN'),
                         string(credentialsId: 'instagram-business-account-id', variable: 'INSTAGRAM_BUSINESS_ACCOUNT_ID'),
                         string(credentialsId: 'facebook-page-id', variable: 'FACEBOOK_PAGE_ID'),
@@ -79,6 +126,8 @@ pipeline {
                         sh '''
                             docker compose up -d \
                                 -e GEMINI_API_KEY=${GEMINI_API_KEY} \
+                                -e INSTAGRAM_USERNAME=${INSTAGRAM_USERNAME} \
+                                -e INSTAGRAM_PASSWORD=${INSTAGRAM_PASSWORD} \
                                 -e INSTAGRAM_ACCESS_TOKEN=${INSTAGRAM_ACCESS_TOKEN} \
                                 -e INSTAGRAM_BUSINESS_ACCOUNT_ID=${INSTAGRAM_BUSINESS_ACCOUNT_ID} \
                                 -e FACEBOOK_PAGE_ID=${FACEBOOK_PAGE_ID} \
@@ -121,7 +170,7 @@ pipeline {
         }
         changed {
             // Runs only if the build status has changed from the previous build
-            echo 'Pipeline status changed.'
+            echo 'Pipeline sta  tus changed.'
         }
     }
 }
