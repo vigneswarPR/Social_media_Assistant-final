@@ -15,17 +15,6 @@ services:
       - logs:/app/logs
     env_file:
       - .env
-    environment:
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-missing}
-      INSTAGRAM_ACCESS_TOKEN: ${INSTAGRAM_ACCESS_TOKEN:-missing}
-      INSTAGRAM_BUSINESS_ACCOUNT_ID: ${INSTAGRAM_BUSINESS_ACCOUNT_ID:-missing}
-      FACEBOOK_PAGE_ID: ${FACEBOOK_PAGE_ID:-missing}
-      FACEBOOK_APP_ID: ${FACEBOOK_APP_ID:-missing}
-      FACEBOOK_APP_SECRET: ${FACEBOOK_APP_SECRET:-missing}
-      CLOUDINARY_CLOUD_NAME: ${CLOUDINARY_CLOUD_NAME:-missing}
-      CLOUDINARY_API_KEY: ${CLOUDINARY_API_KEY:-missing}
-      CLOUDINARY_API_SECRET: ${CLOUDINARY_API_SECRET:-missing}
     depends_on:
       - redis
     restart: unless-stopped
@@ -43,8 +32,6 @@ services:
       - logs:/app/logs
     env_file:
       - .env
-    environment:
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
     depends_on:
       - redis
     restart: unless-stopped
@@ -63,8 +50,6 @@ services:
       - beat_data:/app/celerybeat-schedule
     env_file:
       - .env
-    environment:
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
     depends_on:
       - redis
     restart: unless-stopped
