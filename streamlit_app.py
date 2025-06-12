@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 # Set Streamlit layout
 st.set_page_config(layout="wide", page_title="AI Social Media Assistant")
 
+
 # Initialize session state
 session_defaults = {
     'uploaded_media_path': None,
@@ -903,6 +904,6 @@ elif page == "Analytics":
                             st.metric("Reach", f"{post['reach']:,d}")
     
     except Exception as e:
-        st.error(f"Error loading analytics: {str(e)}")
+        st.error(f"Err or loading analytics: {str(e)}")
         st.info("Please check your Instagram API credentials and try again.")
 

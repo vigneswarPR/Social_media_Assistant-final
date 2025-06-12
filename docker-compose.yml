@@ -1,0 +1,73 @@
+# docker-compose.yml
+version: '3.8' # Use a recent version of Docker Compose file format
+
+services:
+  # Streamlit Web App Service
+  streamlit:
+    build:
+      context: . # Build from the current directory (where Dockerfile is)
+      dockerfile: Dockerfile
+    container_name: social_media_assistant_streamlit
+    ports:
+      - "8501:8501" # Expose Streamlit app on host port 8501
+    volumes:
+      - .:/app # Mount your local project directory into the container for live updates (useful for dev)
+      - uploads:/app/uploads # Persist uploads
+      - logs:/app/logs     # Persist logs
+    env_file:
+      - .env # Load environment variables from .env file
+    depends_on:
+      - redis # Ensure Redis starts before Streamlit
+    restart: unless-stopped # Always restart unless explicitly stopped
+
+  # Celery Worker Service
+  celery_worker:
+    build:
+      context: . # Build from the current directory (uses the same Dockerfile)
+      dockerfile: Dockerfile
+    container_name: social_media_assistant_celery_worker
+    command: celery -A celery_app worker --loglevel=info # Command to start the Celery worker
+    volumes:
+      - .:/app # Mount local project directory
+      - uploads:/app/uploads # Share uploads volume with streamlit
+      - logs:/app/logs     # Share logs volume with streamlit
+    env_file:
+      - .env
+    depends_on:
+      - redis # Ensure Redis starts before the worker
+    restart: unless-stopped
+
+  # Celery Beat Service (Scheduler)
+  celery_beat:
+    build:
+      context: . # Build from the current directory (uses the same Dockerfile)
+      dockerfile: Dockerfile
+    container_name: social_media_assistant_celery_beat
+    command: celery -A celery_app beat --loglevel=info --schedule=/app/celerybeat-schedule # Command to start Celery Beat
+    volumes:
+      - .:/app # Mount local project directory
+      - uploads:/app/uploads # Share uploads volume
+      - logs:/app/logs     # Share logs volume
+      - beat_data:/app/celerybeat-schedule # Persist Celery Beat schedule state
+    env_file:
+      - .env
+    depends_on:
+      - redis # Ensure Redis starts before Celery Beat
+    restart: unless-stopped
+
+  # Redis Service (Message Broker and Backend)
+  redis:
+    image: "redis:7-alpine" # Use a lightweight official Redis image
+    container_name: social_media_assistant_redis
+    ports:
+      - "6379:6379" # Expose Redis on host port 6379
+    volumes:
+      - redis_data:/data # Persist Redis data
+    restart: unless-stopped
+
+# Define named volumes for persistence
+volumes:
+  uploads:
+  logs:
+  redis_data:
+  beat_data:
