@@ -58,6 +58,8 @@ pipeline {
             }
         }
 
+        // The 'Run Tests' stage has been commented out as requested.
+        /*
         stage('Run Tests') {
             steps {
                 script {
@@ -80,17 +82,17 @@ pipeline {
                         // Environment variables from 'withCredentials' and global 'environment' are passed with -e.
                         // Using triple single quotes and ${VARIABLE} for robust parsing.
                         sh '''
-                            docker compose run --rm \
-                                -e GEMINI_API_KEY=${GEMINI_API_KEY} \
-                                -e INSTAGRAM_ACCESS_TOKEN=${INSTAGRAM_ACCESS_TOKEN} \
-                                -e INSTAGRAM_BUSINESS_ACCOUNT_ID=${INSTAGRAM_BUSINESS_ACCOUNT_ID} \
-                                -e FACEBOOK_PAGE_ID=${FACEBOOK_PAGE_ID} \
-                                -e FACEBOOK_APP_ID=${FACEBOOK_APP_ID} \
-                                -e FACEBOOK_APP_SECRET=${FACEBOOK_APP_SECRET} \
-                                -e CLOUDINARY_CLOUD_NAME=${CLOUDINARY_CLOUD_NAME} \
-                                -e CLOUDINARY_API_KEY=${CLOUDINARY_API_KEY} \
-                                -e CLOUDINARY_API_SECRET=${CLOUDINARY_API_SECRET} \
-                                -e REDIS_URL=${REDIS_URL_FOR_CONTAINERS} \
+                            docker compose run --rm \\
+                                -e GEMINI_API_KEY=${GEMINI_API_KEY} \\
+                                -e INSTAGRAM_ACCESS_TOKEN=${INSTAGRAM_ACCESS_TOKEN} \\
+                                -e INSTAGRAM_BUSINESS_ACCOUNT_ID=${INSTAGRAM_BUSINESS_ACCOUNT_ID} \\
+                                -e FACEBOOK_PAGE_ID=${FACEBOOK_PAGE_ID} \\
+                                -e FACEBOOK_APP_ID=${FACEBOOK_APP_ID} \\
+                                -e FACEBOOK_APP_SECRET=${FACEBOOK_APP_SECRET} \\
+                                -e CLOUDINARY_CLOUD_NAME=${CLOUDINARY_CLOUD_NAME} \\
+                                -e CLOUDINARY_API_KEY=${CLOUDINARY_API_KEY} \\
+                                -e CLOUDINARY_API_SECRET=${CLOUDINARY_API_SECRET} \\
+                                -e REDIS_URL=${REDIS_URL_FOR_CONTAINERS} \\
                                 streamlit /usr/local/bin/python -m pytest
                         '''
                     }
@@ -98,6 +100,7 @@ pipeline {
                 }
             }
         }
+        */
 
         stage('Deploy Local (with Secrets)') {
             steps {
@@ -118,21 +121,12 @@ pipeline {
                         string(credentialsId: 'cloudinary-api-key', variable: 'CLOUDINARY_API_KEY'),
                         string(credentialsId: 'cloudinary-api-secret', variable: 'CLOUDINARY_API_SECRET')
                     ]) {
-                        // Pass environment variables directly to docker compose up.
-                        // This ensures these sensitive variables are available inside the Docker containers
-                        // and override any values from a .env file during the Jenkins build.
+                        // FIX: Removed the -e flags for `docker compose up`.
+                        // Environment variables passed via `withCredentials` are already available
+                        // in the shell environment and will be picked up by Docker Compose,
+                        // especially since your `docker-compose.yml` uses `env_file: .env`.
                         sh '''
-                            docker compose up -d \
-                                -e GEMINI_API_KEY=${GEMINI_API_KEY} \
-                                -e INSTAGRAM_ACCESS_TOKEN=${INSTAGRAM_ACCESS_TOKEN} \
-                                -e INSTAGRAM_BUSINESS_ACCOUNT_ID=${INSTAGRAM_BUSINESS_ACCOUNT_ID} \
-                                -e FACEBOOK_PAGE_ID=${FACEBOOK_PAGE_ID} \
-                                -e FACEBOOK_APP_ID=${FACEBOOK_APP_ID} \
-                                -e FACEBOOK_APP_SECRET=${FACEBOOK_APP_SECRET} \
-                                -e CLOUDINARY_CLOUD_NAME=${CLOUDINARY_CLOUD_NAME} \
-                                -e CLOUDINARY_API_KEY=${CLOUDINARY_API_KEY} \
-                                -e CLOUDINARY_API_SECRET=${CLOUDINARY_API_SECRET} \
-                                -e REDIS_URL=${REDIS_URL_FOR_CONTAINERS}
+                            docker compose up -d
                         '''
                         echo "Services started. Streamlit app should be available at http://localhost:8501 on the Jenkins host."
                         // Optional: Add a short delay to allow services to fully initialize before finishing the stage.
