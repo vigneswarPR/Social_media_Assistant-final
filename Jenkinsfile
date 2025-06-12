@@ -63,13 +63,13 @@ pipeline {
                     // This ensures the Streamlit container has access to necessary environment variables.
                     withCredentials([
                         string(credentialsId: 'gemini-api-key', variable: 'GEMINI_API_KEY'),
-                         // Added
-                         // Added
+                        string(credentialsId: 'instagram-username', variable: 'INSTAGRAM_USERNAME'),
+                        string(credentialsId: 'instagram-password', variable: 'INSTAGRAM_PASSWORD'),
                         string(credentialsId: 'instagram-access-token', variable: 'INSTAGRAM_ACCESS_TOKEN'),
                         string(credentialsId: 'instagram-business-account-id', variable: 'INSTAGRAM_BUSINESS_ACCOUNT_ID'),
-
-
-
+                        string(credentialsId: 'facebook-page-id', variable: 'FACEBOOK_PAGE_ID'),
+                        string(credentialsId: 'facebook-app-id', variable: 'FACEBOOK_APP_ID'),
+                        string(credentialsId: 'facebook-app-secret', variable: 'FACEBOOK_APP_SECRET'),
                         string(credentialsId: 'cloudinary-cloud-name', variable: 'CLOUDINARY_CLOUD_NAME'),
                         string(credentialsId: 'cloudinary-api-key', variable: 'CLOUDINARY_API_KEY'),
                         string(credentialsId: 'cloudinary-api-secret', variable: 'CLOUDINARY_API_SECRET')
@@ -77,20 +77,23 @@ pipeline {
                         // This command runs 'pytest' inside the 'streamlit' container.
                         // '--rm' ensures the temporary container is removed after the tests.
                         // Environment variables from 'withCredentials' and global 'environment' are passed with -e.
-                        sh """
+                        // Using triple single quotes and ${VARIABLE} for robust parsing.
+                        sh '''
                             docker compose run --rm \
-                                -e GEMINI_API_KEY=\$GEMINI_API_KEY \
-
-                                -e INSTAGRAM_ACCESS_TOKEN=\$INSTAGRAM_ACCESS_TOKEN \
-                                -e INSTAGRAM_BUSINESS_ACCOUNT_ID=\$INSTAGRAM_BUSINESS_ACCOUNT_ID \
-
-
-                                -e CLOUDINARY_CLOUD_NAME=\$CLOUDINARY_CLOUD_NAME \
-                                -e CLOUDINARY_API_KEY=\$CLOUDINARY_API_KEY \
-                                -e CLOUDINARY_API_SECRET=\$CLOUDINARY_API_SECRET \
+                                -e GEMINI_API_KEY=${GEMINI_API_KEY} \
+                                -e INSTAGRAM_USERNAME=${INSTAGRAM_USERNAME} \
+                                -e INSTAGRAM_PASSWORD=${INSTAGRAM_PASSWORD} \
+                                -e INSTAGRAM_ACCESS_TOKEN=${INSTAGRAM_ACCESS_TOKEN} \
+                                -e INSTAGRAM_BUSINESS_ACCOUNT_ID=${INSTAGRAM_BUSINESS_ACCOUNT_ID} \
+                                -e FACEBOOK_PAGE_ID=${FACEBOOK_PAGE_ID} \
+                                -e FACEBOOK_APP_ID=${FACEBOOK_APP_ID} \
+                                -e FACEBOOK_APP_SECRET=${FACEBOOK_APP_SECRET} \
+                                -e CLOUDINARY_CLOUD_NAME=${CLOUDINARY_CLOUD_NAME} \
+                                -e CLOUDINARY_API_KEY=${CLOUDINARY_API_KEY} \
+                                -e CLOUDINARY_API_SECRET=${CLOUDINARY_API_SECRET} \
                                 -e REDIS_URL=${REDIS_URL_FOR_CONTAINERS} \
                                 streamlit /usr/local/bin/python -m pytest
-                        """
+                        '''
                     }
                     echo "Tests completed."
                 }
@@ -168,7 +171,7 @@ pipeline {
         }
         changed {
             // Runs only if the build status has changed from the previous build
-            echo 'Pipeline sta  tus changed.'
+            echo 'Pipeline status changed.'
         }
     }
 }
