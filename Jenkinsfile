@@ -27,6 +27,7 @@ pipeline {
                     // --- START OF FIX: Explicitly remove all named containers ---
                     // Force remove specific containers if they exist from a previous run
                     sh 'docker rm -f social_media_assistant_redis || true'
+                    sh 'docker rm -f social_media_assistant_redis || true'
                     sh 'docker rm -f social_media_assistant_streamlit || true'
                     sh 'docker rm -f social_media_assistant_celery_worker || true'
                     sh 'docker rm -f social_media_assistant_celery_beat || true'
@@ -148,10 +149,9 @@ pipeline {
     // Post-build actions: These steps run after all stages are complete, regardless of success or failure.
     post {
         always {
-            // echo "Stopping and removing Docker Compose services after pipeline run..."
-            // This command stops containers and removes networks, volumes, and images created by 'docker compose up'.
-            // This ensures a clean slate for the next build.
-            // The 'docker compose down' command was removed from here to keep services running after successful deployment.
+            // This block is intentionally left empty of functional cleanup commands here
+            // to ensure Docker Compose services started in the 'Deploy Local' stage remain running after the pipeline completes.
+            echo 'No post-build cleanup for always block (services kept running).' // Added a placeholder step
         }
         success {
             echo 'Pipeline finished successfully! Services should remain running.'
