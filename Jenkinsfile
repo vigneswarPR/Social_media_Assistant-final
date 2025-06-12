@@ -24,9 +24,13 @@ pipeline {
             steps {
                 script {
                     echo 'Cleaning up any existing Docker Compose services...'
-                    // Force remove the named Redis container if it exists from a previous run (even if stopped)
-                    // This is added to prevent "Conflict" errors during `docker compose run`
+                    // --- START OF FIX: Explicitly remove all named containers ---
+                    // Force remove specific containers if they exist from a previous run
                     sh 'docker rm -f social_media_assistant_redis || true'
+                    sh 'docker rm -f social_media_assistant_streamlit || true'
+                    sh 'docker rm -f social_media_assistant_celery_worker || true'
+                    sh 'docker rm -f social_media_assistant_celery_beat || true'
+                    // --- END OF FIX ---
                     // Stop and remove all services, networks, and volumes from previous runs.
                     // '|| true' ensures the pipeline doesn't fail if there's nothing to remove.
                     sh 'docker compose down --volumes --remove-orphans || true'
