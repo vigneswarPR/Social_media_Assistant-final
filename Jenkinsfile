@@ -22,7 +22,7 @@ pipeline {
                 echo "Checking out source code from Git repository..."
                 // IMPORTANT: Replace with the actual URL of your Git repository.
                 // If it's a private repository, ensure you've configured Git credentials in your Jenkins job.
-                git 'https://github.com/your-username/your-repo.git' // <--- UPDATE THIS URL
+                git 'https://github.com/vigneswarPR/Social_media_Assistant-final.git' // <--- UPDATE THIS URL
                 echo "Source code checked out."
             }
         }
