@@ -17,15 +17,16 @@ pipeline {
 
     // Define the stages of your pipeline.
     stages {
-        stage('Checkout Source Code') {
-            steps {
-                echo "Checking out source code from Git repository..."
-                // IMPORTANT: Replace with the actual URL of your Git repository.
-                // If it's a private repository, ensure you've configured Git credentials in your Jenkins job.
-                git 'https://github.com/vigneswarPR/Social_media_Assistant-final.git' // <--- UPDATE THIS URL
-                echo "Source code checked out."
-            }
-        }
+        // The "Declarative: Checkout SCM" stage handled by Jenkins itself at the start
+        // already fetches your code. This 'Checkout Source Code' stage is redundant and
+        // was causing issues by trying to fetch 'master' branch. It's now removed.
+        // stage('Checkout Source Code') {
+        //     steps {
+        //         echo "Checking out source code from Git repository..."
+        //         git 'https://github.com/vigneswarPR/Social_media_Assistant-final.git'
+        //         echo "Source code checked out."
+        //     }
+        // }
 
         stage('Build Docker Images') {
             steps {
