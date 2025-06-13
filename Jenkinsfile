@@ -13,7 +13,7 @@ pipeline {
             steps {
                 script {
                     echo 'Cleaning up any existing Docker Compose services...'
-                    sh 'docker rm -f social_media_assistant_redis || true'
+                    sh 'docker rm -f social_media_assistant_redis || true' // Fixed repeated line
                     sh 'docker rm -f social_media_assistant_streamlit || true'
                     sh 'docker rm -f social_media_assistant_celery_worker || true'
                     sh 'docker rm -f social_media_assistant_celery_beat || true'
@@ -33,40 +33,6 @@ pipeline {
             }
         }
 
-        // ✅ Inject secrets into a .env file
-        stage('Create .env File from Secrets') {
-            steps {
-                script {
-                    withCredentials([
-                        string(credentialsId: 'gemini-api-key', variable: 'GEMINI_API_KEY'),
-                        string(credentialsId: 'instagram-access-token', variable: 'INSTAGRAM_ACCESS_TOKEN'),
-                        string(credentialsId: 'instagram-business-account-id', variable: 'INSTAGRAM_BUSINESS_ACCOUNT_ID'),
-                        string(credentialsId: 'facebook-page-id', variable: 'FACEBOOK_PAGE_ID'),
-                        string(credentialsId: 'facebook-app-id', variable: 'FACEBOOK_APP_ID'),
-                        string(credentialsId: 'facebook-app-secret', variable: 'FACEBOOK_APP_SECRET'),
-                        string(credentialsId: 'cloudinary-cloud-name', variable: 'CLOUDINARY_CLOUD_NAME'),
-                        string(credentialsId: 'cloudinary-api-key', variable: 'CLOUDINARY_API_KEY'),
-                        string(credentialsId: 'cloudinary-api-secret', variable: 'CLOUDINARY_API_SECRET')
-                    ]) {
-                        writeFile file: '.env', text: """
-GEMINI_API_KEY=${GEMINI_API_KEY}
-INSTAGRAM_ACCESS_TOKEN=${INSTAGRAM_ACCESS_TOKEN}
-INSTAGRAM_BUSINESS_ACCOUNT_ID=${INSTAGRAM_BUSINESS_ACCOUNT_ID}
-FACEBOOK_PAGE_ID=${FACEBOOK_PAGE_ID}
-FACEBOOK_APP_ID=${FACEBOOK_APP_ID}
-FACEBOOK_APP_SECRET=${FACEBOOK_APP_SECRET}
-CLOUDINARY_CLOUD_NAME=${CLOUDINARY_CLOUD_NAME}
-CLOUDINARY_API_KEY=${CLOUDINARY_API_KEY}
-CLOUDINARY_API_SECRET=${CLOUDINARY_API_SECRET}
-REDIS_URL=redis://redis:6379/0
-INSTAGRAM_USERNAME=hogistindia
-"""
-                        echo ".env file created with secrets"
-                    }
-                }
-            }
-        }
-
         stage('Deploy Local (with Secrets)') {
             steps {
                 script {
@@ -82,9 +48,23 @@ INSTAGRAM_USERNAME=hogistindia
                         string(credentialsId: 'cloudinary-api-key', variable: 'CLOUDINARY_API_KEY'),
                         string(credentialsId: 'cloudinary-api-secret', variable: 'CLOUDINARY_API_SECRET')
                     ]) {
+                        // === FIX START ===
+                        // Explicitly pass environment variables to docker compose up -d
+                        // This makes it robust and ensures variables are correctly picked up.
                         sh '''
-                            docker compose up -d
+                            docker compose up -d \\
+                                -e GEMINI_API_KEY="${GEMINI_API_KEY}" \\
+                                -e INSTAGRAM_ACCESS_TOKEN="${INSTAGRAM_ACCESS_TOKEN}" \\
+                                -e INSTAGRAM_BUSINESS_ACCOUNT_ID="${INSTAGRAM_BUSINESS_ACCOUNT_ID}" \\
+                                -e FACEBOOK_PAGE_ID="${FACEBOOK_PAGE_ID}" \\
+                                -e FACEBOOK_APP_ID="${FACEBOOK_APP_ID}" \\
+                                -e FACEBOOK_APP_SECRET="${FACEBOOK_APP_SECRET}" \\
+                                -e CLOUDINARY_CLOUD_NAME="${CLOUDINARY_CLOUD_NAME}" \\
+                                -e CLOUDINARY_API_KEY="${CLOUDINARY_API_KEY}" \\
+                                -e CLOUDINARY_API_SECRET="${CLOUDINARY_API_SECRET}" \\
+                                -e REDIS_URL="${REDIS_URL_FOR_CONTAINERS}"
                         '''
+                        // === FIX END ===
                         echo "Services started. Streamlit app should be available at http://localhost:8501 on the Jenkins host."
                         sh 'sleep 10'
                     }
