@@ -5,6 +5,7 @@ pipeline {
     agent any
 
     environment {
+        // Internal Redis URL for inter-container communication within Docker Compose network.
         REDIS_URL_FOR_CONTAINERS = 'redis://redis:6379/0'
     }
 
@@ -13,7 +14,7 @@ pipeline {
             steps {
                 script {
                     echo 'Cleaning up any existing Docker Compose services...'
-                    sh 'docker rm -f social_media_assistant_redis || true' // Fixed repeated line
+                    sh 'docker rm -f social_media_assistant_redis || true'
                     sh 'docker rm -f social_media_assistant_streamlit || true'
                     sh 'docker rm -f social_media_assistant_celery_worker || true'
                     sh 'docker rm -f social_media_assistant_celery_beat || true'
@@ -27,6 +28,8 @@ pipeline {
             steps {
                 script {
                     echo "Building Docker images for all services defined in docker-compose.yml..."
+                    // Note: You might still see warnings here if your Dockerfile or docker-compose.yml build section
+                    // tries to use these variables during build, but they are generally harmless for `docker compose build`.
                     sh 'docker compose build'
                     echo "Docker images built successfully."
                 }
@@ -48,23 +51,32 @@ pipeline {
                         string(credentialsId: 'cloudinary-api-key', variable: 'CLOUDINARY_API_KEY'),
                         string(credentialsId: 'cloudinary-api-secret', variable: 'CLOUDINARY_API_SECRET')
                     ]) {
-                        // === FIX START ===
-                        // Explicitly pass environment variables to docker compose up -d
-                        // This makes it robust and ensures variables are correctly picked up.
+                        // --- START OF CRITICAL FIX ---
+                        // Dynamically create a .env file with the secrets
+                        // This file will be read by `docker compose up -d`
                         sh '''
-                            docker compose up -d \\
-                                -e GEMINI_API_KEY="${GEMINI_API_KEY}" \\
-                                -e INSTAGRAM_ACCESS_TOKEN="${INSTAGRAM_ACCESS_TOKEN}" \\
-                                -e INSTAGRAM_BUSINESS_ACCOUNT_ID="${INSTAGRAM_BUSINESS_ACCOUNT_ID}" \\
-                                -e FACEBOOK_PAGE_ID="${FACEBOOK_PAGE_ID}" \\
-                                -e FACEBOOK_APP_ID="${FACEBOOK_APP_ID}" \\
-                                -e FACEBOOK_APP_SECRET="${FACEBOOK_APP_SECRET}" \\
-                                -e CLOUDINARY_CLOUD_NAME="${CLOUDINARY_CLOUD_NAME}" \\
-                                -e CLOUDINARY_API_KEY="${CLOUDINARY_API_KEY}" \\
-                                -e CLOUDINARY_API_SECRET="${CLOUDINARY_API_SECRET}" \\
-                                -e REDIS_URL="${REDIS_URL_FOR_CONTAINERS}"
+                            echo "GEMINI_API_KEY=${GEMINI_API_KEY}" > .env
+                            echo "INSTAGRAM_ACCESS_TOKEN=${INSTAGRAM_ACCESS_TOKEN}" >> .env
+                            echo "INSTAGRAM_BUSINESS_ACCOUNT_ID=${INSTAGRAM_BUSINESS_ACCOUNT_ID}" >> .env
+                            echo "FACEBOOK_PAGE_ID=${FACEBOOK_PAGE_ID}" >> .env
+                            echo "FACEBOOK_APP_ID=${FACEBOOK_APP_ID}" >> .env
+                            echo "FACEBOOK_APP_SECRET=${FACEBOOK_APP_SECRET}" >> .env
+                            echo "CLOUDINARY_CLOUD_NAME=${CLOUDINARY_CLOUD_NAME}" >> .env
+                            echo "CLOUDINARY_API_KEY=${CLOUDINARY_API_KEY}" >> .env
+                            echo "CLOUDINARY_API_SECRET=${CLOUDINARY_API_SECRET}" >> .env
+                            echo "REDIS_URL=${REDIS_URL_FOR_CONTAINERS}" >> .env
+
+                            echo "DEBUG: .env file created in workspace (for debugging, will be removed later)"
+                            cat .env # For debugging purposes, remove in production
+                            echo "--- END OF .env debug ---"
+
+                            docker compose up -d # Docker Compose will automatically read the .env file
+
+                            # Clean up the .env file immediately for security
+                            rm .env
                         '''
-                        // === FIX END ===
+                        // --- END OF CRITICAL FIX ---
+
                         echo "Services started. Streamlit app should be available at http://localhost:8501 on the Jenkins host."
                         sh 'sleep 10'
                     }
