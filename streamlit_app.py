@@ -23,6 +23,8 @@ import matplotlib.pyplot as plt
 from collections import defaultdict
 from dateutil import parser
 from instagram_analytics import InstagramAnalytics
+import altair as alt
+from facebook_analytics import FacebookAnalytics
 
 # Configure logging
 logging.basicConfig(
@@ -57,9 +59,17 @@ if st.session_state['post_scheduled_success']:
     st.session_state['post_scheduled_success'] = False
 
 # Page Title
-st.title("📸 AI Social Media Assistant 🎥")
+st.title("📸 Social Media Assistant 🎥")
 st.sidebar.title("Navigation")
+
+# Platform selection
+platform = st.sidebar.selectbox("Select Platform", ["Instagram", "Facebook", "Both"])
+
+# Add page selection based on platform
 page = st.sidebar.radio("Go to", ["Post Scheduler", "Content Calendar", "Scheduled Posts", "Analytics"])
+
+# Update page title based on platform
+st.title(f"📸 {platform} Assistant 🎥")
 
 # Configure Cloudinary
 try:
@@ -80,7 +90,7 @@ if page == "Post Scheduler":
     media_type_choice = st.radio(
         "What type of content are you uploading?",
         ["Image", "Carousel", "Reel"],
-        help="Select the type of content you want to upload. For Reels, video will be resized to 9:16. For Carousel, you can upload 2-20 images."
+        help=f"Select the type of content you want to upload. For Reels, video will be resized to 9:16. For Carousel, you can upload 2-20 images."
     )
     
     # File type restrictions based on selection
@@ -100,8 +110,8 @@ if page == "Post Scheduler":
         allowed_types = ["mp4", "mov"]
         help_text = "Upload a video (MP4 or MOV) that meets Instagram Reels requirements:\n"
         st.session_state['current_media_type'] = "reel"  # Set lowercase media type
-        st.warning("""
-        ⚠️ Instagram Reels Requirements:
+        st.warning(f"""
+        ⚠️ {platform} Reels Requirements:
         
         Your video MUST meet these specifications:
         1. Format: MP4 with H.264 codec
@@ -427,41 +437,50 @@ if page == "Post Scheduler":
                     scheduled_datetime = datetime.now(timezone.utc)
                     local_dt_ist = datetime.now(IST)
                 else:
-                    # Combine date and time and localize to IST using pytz
-                    naive_dt = datetime.combine(st.session_state['schedule_date'], st.session_state['schedule_time'])
-                    local_dt_ist = IST.localize(naive_dt)
-                    # Convert to UTC for storage
-                    scheduled_datetime = local_dt_ist.astimezone(pytz.UTC)
-                
-                # Use isoformat() with proper timezone handling
-                scheduled_datetime_str = scheduled_datetime.replace(microsecond=0).isoformat()
-                
-                # Schedule the post
-                task = schedule_instagram_post.delay(
-                    media_urls,
-                    st.session_state['current_media_type'],
-                    st.session_state['selected_caption_text'],
-                    scheduled_datetime_str,
-                    Config.INSTAGRAM_USERNAME,
-                    cloudinary_ids
-                )
-                
-                result = task.get(timeout=180)
-                if 'error' in result:
-                    st.error(result['error'])
+                    # Combine date and time into a datetime object
+                    scheduled_datetime = datetime.combine(schedule_date, schedule_time)
+                    # Add timezone info (IST) and convert to UTC
+                    scheduled_datetime = IST.localize(scheduled_datetime).astimezone(timezone.utc)
+                    local_dt_ist = IST.localize(datetime.combine(schedule_date, schedule_time))
+
+                # Determine target platforms
+                if platform == "Both":
+                    platforms = ["Instagram", "Facebook"]
+                    platform_display = "Both"
                 else:
-                    st.session_state['post_scheduled_success'] = True
-                    # Reset session state except for schedule date/time
-                    for k in ['uploaded_media_path', 'current_media_type', 'generated_captions', 
-                             'selected_caption_text', 'cloudinary_public_id']:
-                        st.session_state[k] = session_defaults[k]
+                    platforms = [platform]
+                    platform_display = platform
+
+                # Schedule posts for each selected platform
+                for target_platform in platforms:
+                    is_facebook = target_platform == "Facebook"
                     
-                    # Format the scheduled time for display
-                    scheduled_time_str = local_dt_ist.strftime('%Y-%m-%d %I:%M %p IST')
-                    st.success(f"✅ Post scheduled successfully for {scheduled_time_str}!")
-                    st.info("You can view and manage it in the Scheduled Posts tab.")
+                    # Schedule the post with kwargs
+                    task_kwargs = {
+                        'media_url': media_urls,
+                        'media_type': st.session_state['current_media_type'],
+                        'caption': st.session_state['selected_caption_text'],
+                        'scheduled_time_str': scheduled_datetime.isoformat(),
+                        'username': Config.INSTAGRAM_USERNAME,
+                        'cloudinary_public_id': cloudinary_ids,
+                        'is_facebook': is_facebook
+                    }
+                    
+                    result = schedule_instagram_post.delay(**task_kwargs)
+
+                    if result.id:
+                        st.success(f"✅ Post scheduled successfully for {target_platform}!")
+                        st.info(f"🕒 Scheduled for {local_dt_ist.strftime('%Y-%m-%d %I:%M %p')} IST")
+                else:
+                        st.error(f"❌ Failed to schedule post for {target_platform}. Please try again.")
+
+                # Clear the form
+                st.session_state['uploaded_media_path'] = None
+                st.session_state['cloudinary_public_id'] = None
+                st.rerun()
+
             except Exception as e:
-                st.error(f"Scheduling failed: {e}")
+                st.error(f"❌ Error scheduling post: {str(e)}")
 
 # Add logic for "Content Calendar" and "Scheduled Posts" pages here as needed
 
@@ -580,10 +599,17 @@ elif page == "Content Calendar":
         st.info("You can further refine the calendar by editing the downloaded CSV or adjusting your prompt.")
 
 elif page == "Scheduled Posts":
-    st.header("📋 Your Scheduled Posts")
+    st.header(f"📋 Your Scheduled {platform} Posts")
     scheduled_posts = load_scheduled_posts()
 
     if scheduled_posts:
+        # Filter posts based on platform
+        if platform == "Facebook":
+            scheduled_posts = [post for post in scheduled_posts if post.get('platforms') in ['Facebook', 'Both']]
+        elif platform == "Instagram":
+            scheduled_posts = [post for post in scheduled_posts if post.get('platforms') in ['Instagram', 'Both']]
+        # For "Both", show all posts (no filtering needed)
+
         # Sort posts by scheduled time
         scheduled_posts.sort(key=lambda x: x['scheduled_time'])
 
@@ -592,10 +618,15 @@ elif page == "Scheduled Posts":
         # Define IST timezone
         IST = pytz.timezone('Asia/Kolkata')
 
+        # Initialize display columns
+        df['scheduled_time_display'] = ''
+        df['updated_at_display'] = ''
+        df['posting_attempt_at_display'] = ''
+
         # Convert datetime columns to IST
         datetime_columns = ['scheduled_time', 'created_at', 'updated_at', 'posting_attempt_at']
         for col in datetime_columns:
-            if col in df.columns and df[col].notna().any():
+            if col in df.columns and not df[col].empty and df[col].notna().any():
                 try:
                     # Convert to pandas datetime with coerce option to handle invalid dates
                     df[col] = pd.to_datetime(df[col], format='ISO8601', errors='coerce')
@@ -613,14 +644,17 @@ elif page == "Scheduled Posts":
                 except Exception as e:
                     st.error(f"Error processing {col}: {str(e)}")
                     st.write("Data sample:", df[col].head())
+                    # Set default display value on error
+                    df[f'{col}_display'] = ''
 
         # Create display DataFrame with formatted columns
         df_display = pd.DataFrame({
-            'Scheduled Time (IST)': df['scheduled_time_display'],
-            'Caption': df['caption'],
-            'Media Type': df['media_type'],
-            'Status': df['status'],
-            'Error Message': df['error_message'],
+            'Platforms': df.get('platforms', ''),
+            'Scheduled Time (IST)': df.get('scheduled_time_display', ''),
+            'Caption': df.get('caption', ''),
+            'Media Type': df.get('media_type', ''),
+            'Status': df.get('status', ''),
+            'Error Message': df.get('error_message', ''),
             'Last Update': df.get('updated_at_display', ''),
             'Posting Attempt': df.get('posting_attempt_at_display', '')
         })
@@ -633,14 +667,19 @@ elif page == "Scheduled Posts":
         st.dataframe(df_display, use_container_width=True)
 
         st.info(
-            """
+            f"""
             📅 All times are shown in Indian Standard Time (IST / UTC+5:30)
             
             Status meanings:
             - 'scheduled': Waiting for scheduled time
             - 'posting_in_progress': Currently being posted
-            - 'posted': Successfully published to Instagram
+            - 'posted': Successfully published
             - 'failed': Error occurred during posting
+            
+            Platform meanings:
+            - 'Instagram': Post scheduled for Instagram only
+            - 'Facebook': Post scheduled for Facebook only
+            - 'Both': Post scheduled for both platforms
             """
         )
         st.warning("Media files for 'posted' items are automatically deleted from storage to save space.")
@@ -656,253 +695,420 @@ elif page == "Scheduled Posts":
             except Exception as e:
                 st.error(f"Error clearing posts: {str(e)}")
     else:
-        st.info("No scheduled posts found. Schedule some posts using the 'Post Scheduler'!")
+        st.info(f"No scheduled {platform} posts found. Schedule some posts using the 'Post Scheduler'!")
 
 elif page == "Analytics":
-    st.title("📊 Instagram Analytics Dashboard")
+    st.title("📊 Social Media Analytics Dashboard")
     
-    # Initialize InstagramAnalytics if access token is available
-    if not Config.INSTAGRAM_ACCESS_TOKEN:
-        st.error("⚠️ Instagram access token not configured. Please set up your credentials first.")
-        st.stop()
-        
-    try:
-        analytics = InstagramAnalytics(Config.INSTAGRAM_ACCESS_TOKEN)
-        
-        # Use st.cache_data to prevent recomputing on every rerun
-        @st.cache_data(ttl=300)  # Cache for 5 minutes
-        def get_instagram_id(page_id):
-            return analytics.get_instagram_account_id(page_id)
+    # Create tabs for Instagram and Facebook analytics
+    platform_tab = st.radio("Select Platform", ["Instagram", "Facebook"])
+    
+    if platform_tab == "Instagram":
+        st.header("📸 Instagram Analytics")
+        # Initialize InstagramAnalytics if access token is available
+        if not Config.INSTAGRAM_ACCESS_TOKEN:
+            st.error("⚠️ Instagram access token not configured. Please set up your credentials first.")
+            st.stop()
             
-        @st.cache_data(ttl=300)
-        def get_analytics_data(instagram_id):
-            return analytics.get_media_insights(instagram_id)
+        try:
+            analytics = InstagramAnalytics(Config.INSTAGRAM_ACCESS_TOKEN)
             
-        # Create progress container
-        progress_container = st.empty()
-        
-        with progress_container:
-            with st.spinner("🔄 Loading Instagram analytics..."):
-                instagram_id = get_instagram_id(Config.FACEBOOK_PAGE_ID)
-                posts = get_analytics_data(instagram_id)
-        
-        if not posts:
-            st.warning("No posts data available. Showing sample data for demonstration.")
-        
-        # Create tabs for different analytics sections
-        tab1, tab2, tab3 = st.tabs(["📈 Growth Metrics", "⏰ Best Time to Post", "🎯 Post Performance"])
-        
-        with tab1:
-            st.header("Account Growth")
+            # Use st.cache_data to prevent recomputing on every rerun
+            @st.cache_data(ttl=300)  # Cache for 5 minutes
+            def get_instagram_id(page_id):
+                return analytics.get_instagram_account_id(page_id)
+                
+            @st.cache_data(ttl=300)
+            def get_analytics_data(instagram_id):
+                return analytics.get_media_insights(instagram_id)
+                
+            # Create progress container
+            progress_container = st.empty()
             
-            # Make the graph section full width
-            # Follower Growth Chart
-            dates, counts = analytics.get_follower_count_trend(instagram_id)
-            if dates and counts:
-                # Create a larger figure with better proportions
-                fig = plt.figure(figsize=(16, 8))
-                
-                # Plot with enhanced styling
-                plt.plot(dates, counts, marker='o', linestyle='-', linewidth=2.5, 
-                        color='#1f77b4', markersize=8)
-                
-                # Add grid and styling
-                plt.grid(True, linestyle='--', alpha=0.7)
-                plt.title("Follower Growth Trend (Last 7 Days)", fontsize=16, pad=20)
-                plt.xlabel("Date", fontsize=12, labelpad=10)
-                plt.ylabel("Total Followers", fontsize=12, labelpad=10)
-                
-                # Rotate x-axis labels for better readability
-                plt.xticks(rotation=45, ha='right')
-                
-                # Add data points annotation
-                for i, (date, count) in enumerate(zip(dates, counts)):
-                    plt.annotate(f'{count:,}', 
-                               (date, count),
-                               textcoords="offset points",
-                               xytext=(0,10),
-                               ha='center',
-                               fontsize=10)
-                
-                # Adjust layout to prevent label cutoff
-                plt.tight_layout()
-                
-                # Use the full width of the page
-                st.pyplot(fig, use_container_width=True)
-                plt.close()
-                
-                # Show metrics in columns below the graph
-                col1, col2, col3 = st.columns(3)
-                
-                # Calculate metrics
-                growth = counts[-1] - counts[0]
-                growth_rate = ((counts[-1] / counts[0]) - 1) * 100 if counts[0] > 0 else 0
-                daily_avg = growth / len(counts) if len(counts) > 1 else 0
-                
-                with col1:
-                    st.metric(
-                        "Total Growth (7 Days)", 
-                        f"{growth:+,d}",
-                        f"{growth_rate:.1f}%"
-                    )
-                with col2:
-                    st.metric(
-                        "Current Followers",
-                        f"{counts[-1]:,d}",
-                        f"Started at {counts[0]:,d}"
-                    )
-                with col3:
-                    st.metric(
-                        "Average Daily Growth",
-                        f"{daily_avg:+.1f}",
-                        f"{(daily_avg/counts[0]*100):.2f}% per day" if counts[0] > 0 else "N/A"
-                    )
-        
-        with tab2:
-            st.header("Optimal Posting Times")
+            with progress_container:
+                with st.spinner("🔄 Loading Instagram analytics..."):
+                    instagram_id = get_instagram_id(Config.FACEBOOK_PAGE_ID)
+                    posts = get_analytics_data(instagram_id)
             
-            if posts:
-                # Convert posts to JSON string for caching
-                posts_json = json.dumps(posts)
-                best_times = analytics.get_best_times(posts_json)
+            if not posts:
+                st.warning("No posts data available. Showing sample data for demonstration.")
+            
+            # Create tabs for different analytics sections
+            tab1, tab2, tab3 = st.tabs(["📈 Growth Metrics", "⏰ Best Time to Post", "🎯 Post Performance"])
+            
+            with tab1:
+                st.subheader("Account Growth")
+                try:
+                    dates, counts = analytics.get_follower_count_trend(instagram_id)
+                    if dates and counts:
+                        df = pd.DataFrame({
+                            'Date': dates,
+                            'Followers': counts
+                        })
+                        st.line_chart(df.set_index('Date'))
+                    else:
+                        st.info("No follower data available")
+                except Exception as e:
+                    st.error(f"Error loading follower trend: {str(e)}")
+            
+            with tab2:
+                st.subheader("Best Time to Post")
+                if posts:
+                    best_times = analytics.get_best_times(json.dumps(posts))
+                    if best_times:
+                        # Convert to DataFrame for better visualization
+                        hours = list(best_times.keys())
+                        engagement_rates = [data['engagement_rate'] for data in best_times.values()]
+                        post_counts = [data['post_count'] for data in best_times.values()]
+                        
+                        df = pd.DataFrame({
+                            'Hour': hours,
+                            'Engagement Rate (%)': engagement_rates,
+                            'Number of Posts': post_counts
+                        })
+                        
+                        # Sort by engagement rate to find best times
+                        best_hours = df.nlargest(5, 'Engagement Rate (%)')
+                        
+                        # Display best posting times
+                        st.write("Top 5 Best Times to Post:")
+                        for _, row in best_hours.iterrows():
+                            hour = int(row['Hour'])
+                            time_str = f"{hour:02d}:00"
+                            st.write(f"🕒 {time_str} - Engagement Rate: {row['Engagement Rate (%)']:.1f}% (Based on {row['Number of Posts']} posts)")
+                        
+                        # Plot hourly engagement rates
+                        st.write("Hourly Engagement Rate Distribution:")
+                        chart = alt.Chart(df).mark_bar().encode(
+                            x=alt.X('Hour:Q', axis=alt.Axis(title='Hour of Day')),
+                            y=alt.Y('Engagement Rate (%):Q', axis=alt.Axis(title='Engagement Rate (%)')),
+                            tooltip=['Hour:Q', 'Engagement Rate (%):Q', 'Number of Posts:Q']
+                        ).properties(height=400)
+                        st.altair_chart(chart, use_container_width=True)
+                    else:
+                        st.info("Not enough data to determine best posting times")
+            
+            with tab3:
+                st.subheader("Post Performance")
+                if posts:
+                    # Calculate average engagement rate
+                    avg_engagement = sum(post['engagement_rate'] for post in posts) / len(posts)
+                    st.metric("Average Engagement Rate", f"{avg_engagement:.1f}%")
+                    
+                    # Show top performing posts
+                    st.subheader("Top Performing Posts")
+                    top_posts = sorted(posts, key=lambda x: x['engagement_rate'], reverse=True)
+                    
+                    num_top_posts = st.slider("Number of top posts to show", 3, 10, 5)
+                    
+                    for i, post in enumerate(top_posts[:num_top_posts], 1):
+                        with st.expander(
+                            f"#{i} - Posted on {parser.isoparse(post['timestamp']).strftime('%Y-%m-%d %H:%M')} "
+                            f"(Engagement: {post['engagement_rate']:.1f}%)"
+                        ):
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.metric("Likes", f"{post['likes']:,d}")
+                                st.metric("Comments", f"{post['comments']:,d}")
+                            with col2:
+                                st.metric("Saves", f"{post['saved']:,d}")
+                                st.metric("Reach", f"{post['reach']:,d}")
+                            
+                            # Add View Post link if permalink_url is available
+                            if post.get('permalink_url'):
+                                st.markdown(
+                                    f"""
+                                    <div style="
+                                        display: flex;
+                                        justify-content: flex-end;
+                                        margin-top: 10px;
+                                    ">
+                                        <a href="{post['permalink_url']}" target="_blank" style="
+                                            text-decoration: none;
+                                            color: #1976d2;
+                                            font-weight: 500;
+                                        ">View Post →</a>
+                                    </div>
+                                    """,
+                                    unsafe_allow_html=True
+                                )
+        except Exception as e:
+            st.error(f"Error loading Instagram analytics: {str(e)}")
+            st.info("Please check your Instagram API credentials and try again.")
+            
+    else:  # Facebook Analytics
+        st.header("📘 Facebook Analytics")
+        
+        if not Config.INSTAGRAM_ACCESS_TOKEN:
+            st.error("⚠️ Access Token not configured. Please set up your Instagram credentials first.")
+            st.info("""
+            To set up Facebook Analytics, you need to:
+            1. Configure your Instagram access token in the .env file
+            2. Make sure your Instagram account is connected to a Facebook Page
+            3. Ensure you have the correct permissions enabled
+            """)
+            st.stop()
+        
+        if not Config.FACEBOOK_PAGE_ID:
+            st.error("⚠️ Facebook Page ID not configured.")
+            st.info("Please add your Facebook Page ID to the .env file as FACEBOOK_PAGE_ID")
+            st.stop()
+            
+        try:
+            analytics = FacebookAnalytics(Config.INSTAGRAM_ACCESS_TOKEN)
+            
+            @st.cache_data(ttl=300)
+            def get_facebook_analytics_data(page_id):
+                return analytics.get_page_posts(page_id)
                 
-                # Create engagement heatmap
-                hours = list(range(24))
-                values = [best_times[h]['engagement_rate'] for h in hours]
+            @st.cache_data(ttl=300)
+            def get_facebook_growth_data(page_id, days=30):
+                return analytics.get_growth_metrics(page_id, days)
+            
+            try:
+                posts = get_facebook_analytics_data(Config.FACEBOOK_PAGE_ID)
+                # Initialize growth data with default 30 days
+                growth_data = get_facebook_growth_data(Config.FACEBOOK_PAGE_ID, 30)
+            except ValueError as e:
+                st.error(str(e))
+                st.stop()
+            except Exception as e:
+                st.error("Could not fetch Facebook data. Please verify your page ID and permissions.")
+                logger.error(f"Facebook API error: {str(e)}")
+                st.stop()
+            
+            if not posts:
+                st.warning("No posts found for this Facebook page.")
+                st.info("""
+                Please check:
+                1. The page has posts
+                2. Your access token has sufficient permissions
+                3. The Instagram account is properly connected to the Facebook page
+                """)
+                st.stop()
                 
-                fig = plt.figure(figsize=(12, 4))
-                plt.bar(hours, values, color='#2ecc71')
-                plt.title("Average Engagement Rate by Hour")
-                plt.xlabel("Hour of Day (24-hour format)")
-                plt.ylabel("Engagement Rate (%)")
-                plt.xticks(hours)
-                plt.grid(True, alpha=0.3)
-                plt.tight_layout()
-                st.pyplot(fig)
-                plt.close()
+            # Create tabs for different analytics sections
+            tab1, tab2, tab3 = st.tabs(["📈 Growth Metrics", "⏰ Best Time to Post", "🎯 Post Performance"])
+            
+            with tab1:
+                st.subheader("Growth Metrics")
+                try:
+                    # Allow users to select the time range
+                    days = st.slider("Select time range (days)", min_value=7, max_value=90, value=30, step=1)
+                    growth_data = get_facebook_growth_data(Config.FACEBOOK_PAGE_ID, days)
+                    
+                    if growth_data:
+                        # Create metrics grid
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            st.metric(
+                                "Follower Growth", 
+                                f"+{growth_data['total_followers_gained']}", 
+                                f"{growth_data['follower_growth_rate']}% ({growth_data['total_followers_lost']} lost)"
+                            )
+                        with col2:
+                            st.metric(
+                                "Total Engagement",
+                                f"{growth_data['total_engagement']:,}",
+                                f"{growth_data['engagement_rate']}% rate"
+                            )
+                        with col3:
+                            st.metric(
+                                "Page Views",
+                                f"{growth_data['total_reach']:,}"
+                            )
+                        with col4:
+                            daily_metrics = growth_data.get('daily_metrics', [])
+                            active_days = len(set(m['date'] for m in daily_metrics))
+                            st.metric(
+                                "Active Days",
+                                active_days,
+                                f"of last {days} days"
+                            )
+                        
+                        # Show daily trends if available
+                        if daily_metrics:
+                            st.subheader("")
+                            # Convert daily metrics to DataFrame
+                            df_data = {}
+                            for metric in daily_metrics:
+                                date = metric['date']
+                                if date not in df_data:
+                                    df_data[date] = {}
+                                df_data[date][metric['metric']] = metric['value']
+                            
+                            df = pd.DataFrame.from_dict(df_data, orient='index')
+                            df.index = pd.to_datetime(df.index)
+                            df = df.sort_index()
+                            
+                            # Plot engagement trend
+                            if 'page_engaged_users' in df.columns:
+                                st.line_chart(df['page_engaged_users'], use_container_width=True)
+                    else:
+                        st.warning("No growth metrics available. This could be because:")
+                        st.markdown("""
+                        - The page is too new
+                        - There isn't enough activity yet
+                        - You don't have the required permissions
+                        
+                        Please ensure:
+                        1. Your page has been active for at least a few days
+                        2. You have admin access to the page
+                        3. The page is properly connected to your Facebook account
+                        """)
+                except Exception as e:
+                    st.error(f"Error displaying growth metrics: {str(e)}")
+                    st.info("Please check your Facebook page permissions and try again.")
+            
+            with tab2:
+                st.subheader("Best Time to Post")
+                best_times = analytics.get_best_times(posts)
+                
+                if best_times:
+                    # Create a more visual representation of best times
+                    col1, col2 = st.columns([2, 1])
+                    
+                    with col1:
+                        # Create time blocks with engagement rates
+                        st.write("Engagement by Hour:")
+                        for hour in range(24):
+                            data = best_times.get(hour, {})
+                            engagement_rate = data.get('engagement_rate', 0)
+                            post_count = data.get('post_count', 0)
+                            
+                            # Format time
+                            time_str = f"{hour:02d}:00"
+                            if hour < 12:
+                                time_str += " AM"
+                            else:
+                                time_str = f"{hour-12:02d}:00 PM" if hour > 12 else "12:00 PM"
+                            
+                            # Create engagement bar
+                            st.markdown(
+                                f"""
+                                <div style="
+                                    display: flex;
+                                    align-items: center;
+                                    margin-bottom: 5px;
+                                ">
+                                    <div style="width: 80px;">{time_str}</div>
+                                    <div style="
+                                        flex-grow: 1;
+                                        background: linear-gradient(90deg, rgba(66, 133, 244, {min(1, engagement_rate/100)}) {min(100, engagement_rate)}%, #f0f2f6 {min(100, engagement_rate)}%);
+                                        height: 20px;
+                                        border-radius: 4px;
+                                        padding: 0 10px;
+                                        display: flex;
+                                        align-items: center;
+                                        color: white;
+                                    ">
+                                        {engagement_rate:.1f}% ({post_count} posts)
+                                    </div>
+                                </div>
+                                """,
+                                unsafe_allow_html=True
+                            )
+                    
+                    with col2:
+                        st.write("Top Posting Times:")
+                        best_hours = sorted(
+                            [(h, d['engagement_rate']) for h, d in best_times.items() if d['engagement_rate'] > 0],
+                            key=lambda x: x[1],
+                            reverse=True
+                        )[:3]
+                        
+                        for hour, rate in best_hours:
+                            time_str = f"{hour:02d}:00"
+                            if hour < 12:
+                                time_str += " AM"
+                            else:
+                                time_str = f"{hour-12:02d}:00 PM" if hour > 12 else "12:00 PM"
+                            st.markdown(f"🕒 **{time_str}** _{rate:.1f}% engagement_")
+                else:
+                    st.warning("Not enough data to determine best posting times.")
+                    
+            with tab3:
+                st.subheader("Post Performance")
+                try:
+                    # Calculate average engagement rate
+                    avg_er = sum(post['engagement_rate'] for post in posts) / len(posts)
+                    
+                    # Create metrics row
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Average Engagement", f"{avg_er:.1f}%")
+                    with col2:
+                        total_reactions = sum(post['reactions'] for post in posts)
+                        st.metric("Total Reactions", f"👍 {total_reactions:,}")
+                    with col3:
+                        total_comments = sum(post['comments'] for post in posts)
+                        st.metric("Total Comments", f"💬 {total_comments:,}")
+                    
+                    # Show top performing posts
+                    st.subheader("Top Performing Posts")
+                    num_top_posts = st.select_slider("Number of top posts to show", options=[3, 5, 10], value=3)
+                    
+                    # Sort posts by engagement rate
+                    top_posts = sorted(posts, key=lambda x: x['engagement_rate'], reverse=True)[:num_top_posts]
+                    
+                    for i, post in enumerate(top_posts, 1):
+                        with st.container():
+                            st.markdown(
+                                f"""
+                                <div style="
+                                    padding: 15px;
+                                    border-radius: 8px;
+                                    border: 1px solid #e1e4e8;
+                                    margin-bottom: 15px;
+                                    background-color: white;
+                                ">
+                                    <div style="
+                                        display: flex;
+                                        justify-content: space-between;
+                                        margin-bottom: 10px;
+                                    ">
+                                        <div>
+                                            <strong>#{i}</strong> - Posted on {datetime.strptime(post['created_time'][:19], '%Y-%m-%dT%H:%M:%S').strftime('%Y-%m-%d %H:%M')}
+                                        </div>
+                                        <div style="
+                                            background-color: #e3f2fd;
+                                            padding: 2px 8px;
+                                            border-radius: 4px;
+                                            color: #1976d2;
+                                        ">
+                                            {post['engagement_rate']:.1f}% engagement
+                                        </div>
+                                    </div>
+                                    <div style="
+                                        color: #666;
+                                        margin: 10px 0;
+                                    ">
+                                        {post['message'][:200] + ('...' if len(post['message']) > 200 else '')}
+                                    </div>
+                                    <div style="
+                                        display: flex;
+                                        justify-content: space-between;
+                                        align-items: center;
+                                        margin-top: 10px;
+                                    ">
+                                        <div>
+                                            👍 <strong>{post['reactions']:,}</strong> &nbsp;
+                                            💬 <strong>{post['comments']:,}</strong>
+                                        </div>
+                                        <a href="{post['permalink_url']}" target="_blank" style="
+                                            text-decoration: none;
+                                            color: #1976d2;
+                                        ">View Post →</a>
+                                    </div>
+                                </div>
+                                """,
+                                unsafe_allow_html=True
+                            )
+                            
+                except Exception as e:
+                    st.error(f"Error analyzing post performance: {str(e)}")
+        except Exception as e:
+            st.error(f"Error initializing Facebook analytics: {str(e)}")
+            st.info("Please check your credentials and try again.")
 
-                # Show best posting times with more detail
-                st.subheader("🎯 Recommended Posting Times")
-                sorted_hours = sorted(best_times.items(), 
-                                   key=lambda x: (x[1]['engagement_rate'], x[1]['post_count']), 
-                                   reverse=True)
-                
-                top_hours = st.slider("Number of top hours to show", 3, 8, 5)
-                
-                for i, (hour, data) in enumerate(sorted_hours[:top_hours], 1):
-                    with st.expander(
-                        f"#{i} - {hour:02d}:00 - {(hour+1):02d}:00 "
-                        f"(Engagement: {data['engagement_rate']:.1f}%)"
-                    ):
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.metric("Posts at this hour", data['post_count'])
-                            st.metric("Avg. Engagement", f"{data['avg_engagement']:,d}")
-                        with col2:
-                            st.metric("Avg. Reach", f"{data['avg_reach']:,d}")
-                            st.metric("Success Rate", f"{data['engagement_rate']:.1f}%")
-        
-        with tab3:
-            st.header("Post Performance Analysis")
-            
-            if posts:
-                # Calculate overall engagement metrics
-                engagement_rates = [post['engagement_rate'] for post in posts]
-                avg_rate = sum(engagement_rates) / len(engagement_rates)
-                
-                # Show overall metrics
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Posts Analyzed", len(posts))
-                with col2:
-                    st.metric("Avg. Engagement Rate", f"{avg_rate:.1f}%")
-                with col3:
-                    st.metric("Best Performing Post", f"{max(engagement_rates):.1f}%")
-                
-                # Show detailed engagement metrics
-                st.subheader("Engagement Breakdown")
-                total_likes = sum(post['likes'] for post in posts)
-                total_comments = sum(post['comments'] for post in posts)
-                total_saves = sum(post['saved'] for post in posts)
-                total_reach = sum(post['reach'] for post in posts)
-                
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("Total Likes", f"{total_likes:,d}")
-                with col2:
-                    st.metric("Total Comments", f"{total_comments:,d}")
-                with col3:
-                    st.metric("Total Saves", f"{total_saves:,d}")
-                with col4:
-                    st.metric("Total Reach", f"{total_reach:,d}")
-                
-                # Create performance visualizations
-                st.subheader("Performance Analysis")
-                
-                tab_hist, tab_trend = st.tabs(["📊 Distribution", "📈 Trends"])
-                
-                with tab_hist:
-                    fig = plt.figure(figsize=(10, 4))
-                    plt.hist(engagement_rates, bins=20, color='#3498db', alpha=0.7)
-                    plt.title("Engagement Rate Distribution")
-                    plt.xlabel("Engagement Rate (%)")
-                    plt.ylabel("Number of Posts")
-                    plt.grid(True, alpha=0.3)
-                    plt.tight_layout()
-                    st.pyplot(fig)
-                    plt.close()
-                
-                with tab_trend:
-                    fig = plt.figure(figsize=(12, 6))
-                    
-                    # Plot engagement rate trend
-                    plt.subplot(2, 1, 1)
-                    timestamps = [parser.isoparse(post['timestamp']) for post in posts]
-                    plt.plot(timestamps, engagement_rates, marker='o', 
-                            linestyle='-', color='#e74c3c', alpha=0.7,
-                            label='Engagement Rate (%)')
-                    plt.title("Engagement Rate Trend")
-                    plt.ylabel("Engagement Rate (%)")
-                    plt.grid(True, alpha=0.3)
-                    plt.legend()
-                    
-                    # Plot individual metrics
-                    plt.subplot(2, 1, 2)
-                    plt.plot(timestamps, [post['likes'] for post in posts], 
-                            marker='o', label='Likes', alpha=0.7)
-                    plt.plot(timestamps, [post['comments'] for post in posts], 
-                            marker='s', label='Comments', alpha=0.7)
-                    plt.plot(timestamps, [post['saved'] for post in posts], 
-                            marker='^', label='Saves', alpha=0.7)
-                    plt.xlabel("Post Date")
-                    plt.ylabel("Count")
-                    plt.grid(True, alpha=0.3)
-                    plt.legend()
-                    
-                    plt.tight_layout()
-                    st.pyplot(fig)
-                    plt.close()
-                
-                # Show top performing posts
-                st.subheader("Top Performing Posts")
-                top_posts = sorted(posts, key=lambda x: x['engagement_rate'], reverse=True)
-                
-                num_top_posts = st.slider("Number of top posts to show", 3, 10, 5)
-                
-                for i, post in enumerate(top_posts[:num_top_posts], 1):
-                    with st.expander(
-                        f"#{i} - Posted on {parser.isoparse(post['timestamp']).strftime('%Y-%m-%d %H:%M')} "
-                        f"(Engagement: {post['engagement_rate']:.1f}%)"
-                    ):
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.metric("Likes", f"{post['likes']:,d}")
-                            st.metric("Comments", f"{post['comments']:,d}")
-                        with col2:
-                            st.metric("Saves", f"{post['saved']:,d}")
-                            st.metric("Reach", f"{post['reach']:,d}")
-    
-    except Exception as e:
-        st.error(f"Error loading analytics: {str(e)}")
-        st.info("Please check your Instagram API credentials and try again.")
 
