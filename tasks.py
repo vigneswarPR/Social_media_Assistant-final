@@ -11,6 +11,8 @@ import numpy as np
 import subprocess
 import tempfile
 from urllib.parse import urlparse
+from typing import Optional, List, Tuple, Dict, Any
+import asyncio
 
 from celery_app import celery_app
 import google.generativeai as genai
@@ -27,6 +29,7 @@ import cloudinary.uploader
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, Boolean, Float, JSON
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy import inspect
 
 # Configure logging with both file and console handlers
 def setup_logging():
@@ -102,6 +105,16 @@ engine = create_engine(DATABASE_URL)
 Base = declarative_base()
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
+# Drop existing tables and recreate with new schema
+def recreate_database():
+    try:
+        Base.metadata.drop_all(bind=engine)
+        Base.metadata.create_all(bind=engine)
+        logger.info("Database schema updated successfully")
+    except Exception as e:
+        logger.error(f"Error recreating database: {e}")
+        raise
+
 # Configure Cloudinary for potential deletion later
 try:
     cloudinary.config(
@@ -142,6 +155,8 @@ class ScheduledPost(Base):
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
                         onupdate=lambda: datetime.now(timezone.utc))
     cloudinary_public_ids = Column(JSON, nullable=True)  # Store array of Cloudinary public IDs
+    is_facebook = Column(Boolean, default=False)  # New field to distinguish Facebook posts
+    platforms = Column(String, default='Instagram')  # New field to show platforms (Instagram, Facebook, or Both)
     
     def to_dict(self):
         return {
@@ -158,7 +173,9 @@ class ScheduledPost(Base):
             "media_id": self.media_id,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
-            "cloudinary_public_ids": self.cloudinary_public_ids
+            "cloudinary_public_ids": self.cloudinary_public_ids,
+            "is_facebook": self.is_facebook,
+            "platforms": self.platforms
         }
 
 
@@ -175,8 +192,8 @@ class PostStatusHistory(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
-# Create database tables
-Base.metadata.create_all(bind=engine)
+# Recreate database with new schema
+recreate_database()
 
 # Configure Gemini
 genai.configure(api_key=Config.GEMINI_API_KEY)
@@ -199,48 +216,105 @@ def load_scheduled_posts():
     """Load all scheduled posts from the database"""
     db = SessionLocal()
     try:
-        posts = db.query(ScheduledPost).order_by(ScheduledPost.scheduled_time.asc()).all()
-        return [post.to_dict() for post in posts]
+        # Query all posts
+        posts = db.query(ScheduledPost).all()
+        
+        # Convert to list of dictionaries with proper formatting
+        posts_data = []
+        for post in posts:
+            post_dict = {
+                'id': post.id,
+                'media_urls': post.media_urls,
+                'media_type': post.media_type,
+                'caption': post.caption,
+                'scheduled_time': post.scheduled_time.isoformat() if post.scheduled_time else None,
+                'username': post.username,
+                'status': post.status,
+                'celery_task_id': post.celery_task_id,
+                'posting_attempt_at': post.posting_attempt_at.isoformat() if post.posting_attempt_at else None,
+                'error_message': post.error_message,
+                'media_id': post.media_id,
+                'created_at': post.created_at.isoformat() if post.created_at else None,
+                'updated_at': post.updated_at.isoformat() if post.updated_at else None,
+                'cloudinary_public_ids': post.cloudinary_public_ids,
+                'is_facebook': post.is_facebook,
+                'platforms': post.platforms or ('Facebook' if post.is_facebook else 'Instagram')
+            }
+            posts_data.append(post_dict)
+            
+        logger.info(f"Loaded {len(posts_data)} posts from database")
+        return posts_data
+        
     except Exception as e:
-        logger.error(f"Error loading scheduled posts from DB: {e}")
+        logger.error(f"Error loading scheduled posts: {e}")
         return []
     finally:
         db.close()
 
-def save_scheduled_post_to_db(post_data: dict):
+def save_scheduled_post_to_db(post_data: dict) -> Optional[str]:
+    """Save a scheduled post to the database"""
     db = SessionLocal()
     try:
-        # Ensure media_urls and cloudinary_public_ids are lists
-        media_urls = post_data['media_urls'] if isinstance(post_data['media_urls'], list) else [post_data['media_urls']]
-        cloudinary_public_ids = post_data.get('cloudinary_public_ids', [])
-        if not isinstance(cloudinary_public_ids, list):
-            cloudinary_public_ids = [cloudinary_public_ids] if cloudinary_public_ids else []
-
-        # Start a transaction
-        db.begin()
-
+        logger.info("Attempting to save post to database with data: %s", {
+            k: v for k, v in post_data.items() if k != 'caption'  # Exclude caption for brevity
+        })
+        
+        # Create new post instance
         new_post = ScheduledPost(
-            id=post_data.get('id', str(uuid.uuid4())),
-            media_urls=media_urls,
+            id=str(uuid.uuid4()),
+            media_urls=post_data['media_urls'],
             media_type=post_data['media_type'],
             caption=post_data['caption'],
             scheduled_time=post_data['scheduled_time'],
             username=post_data['username'],
-            status=post_data.get('status', 'scheduled'),
-            cloudinary_public_ids=cloudinary_public_ids,
-            created_at=datetime.now(timezone.utc)
+            status='scheduled',
+            cloudinary_public_ids=post_data['cloudinary_public_ids'],
+            created_at=datetime.now(timezone.utc),
+            is_facebook=post_data['is_facebook'],
+            platforms=post_data.get('platforms', 'Instagram')  # Default to Instagram if not specified
         )
+        
+        logger.info("Created new post instance with ID: %s", new_post.id)
+        
+        # Add and commit
         db.add(new_post)
+        logger.info("Added post to session")
+        
         db.commit()
+        logger.info("Committed post to database")
+        
         db.refresh(new_post)
-        logger.info(f"Scheduled post {new_post.id} saved to DB with {len(media_urls)} media items.")
-        return new_post
+        post_id = new_post.id
+        
+        # Schedule the actual posting task
+        eta = post_data['scheduled_time']
+        if eta <= datetime.now(timezone.utc):
+            eta = datetime.now(timezone.utc) + timedelta(seconds=5)
+        
+        logger.info("Scheduling posting task for time: %s", eta)
+        
+        task = _post_media_to_instagram_graph_api.apply_async(
+            args=[post_id, post_data['media_urls'], post_data['media_type'], 
+                  post_data['caption'], post_data['username'], post_data['is_facebook']],
+            eta=eta
+        )
+        
+        logger.info("Created Celery task with ID: %s", task.id)
+        
+        # Update post with task ID
+        new_post.celery_task_id = task.id
+        db.commit()
+        logger.info("Updated post with Celery task ID")
+        
+        return post_id
+        
     except Exception as e:
+        logger.error(f"Error saving post to database: {e}", exc_info=True)
         db.rollback()
-        logger.error(f"Error saving scheduled post to DB: {e}")
-        raise
+        return None
     finally:
         db.close()
+        logger.info("Database connection closed")
 
 def track_post_status_change(db: Session, post_id: str, previous_status: str, 
                            new_status: str, error_message: str = None, media_id: str = None):
@@ -553,40 +627,44 @@ def generate_captions(self, media_path, media_type, style='high_engagement', cus
 
 @celery_app.task
 def schedule_instagram_post(media_url: str, media_type: str, caption: str, scheduled_time_str: str, username: str,
-                            cloudinary_public_id: str = None):
-    """Schedule a post for Instagram. For carousel posts, media_url and cloudinary_public_id should be lists."""
+                          cloudinary_public_id: str = None, is_facebook: bool = False):
+    """Schedule a post for Instagram/Facebook"""
     try:
-        scheduled_time = datetime.fromisoformat(scheduled_time_str).astimezone(timezone.utc)
+        # Convert media_url and cloudinary_public_id to lists if they're not already
+        media_urls = media_url if isinstance(media_url, list) else [media_url]
+        cloudinary_ids = cloudinary_public_id if isinstance(cloudinary_public_id, list) else [cloudinary_public_id]
         
-        # Ensure media_url and cloudinary_public_id are lists for carousel posts
-        if media_type == 'carousel':
-            if not isinstance(media_url, list) or not isinstance(cloudinary_public_id, list):
-                raise ValueError("Carousel posts require lists of media URLs and Cloudinary public IDs")
-            if len(media_url) < 2 or len(media_url) > 20:
-                raise ValueError("Carousel posts must have between 2 and 20 images")
-            if len(media_url) != len(cloudinary_public_id):
-                raise ValueError("Number of media URLs and Cloudinary public IDs must match")
-        else:
-            # Convert single items to lists for consistent handling
-            media_url = [media_url] if isinstance(media_url, str) else media_url
-            cloudinary_public_id = [cloudinary_public_id] if isinstance(cloudinary_public_id, str) else cloudinary_public_id
-
+        # Parse scheduled time
+        scheduled_time = datetime.fromisoformat(scheduled_time_str)
+        
+        # Determine platform based on is_facebook flag
+        platforms = "Facebook" if is_facebook else "Instagram"
+        
+        # Create post data
         post_data = {
-            'id': str(uuid.uuid4()),
-            'media_urls': media_url if isinstance(media_url, list) else [media_url],
+            'media_urls': media_urls,
             'media_type': media_type,
             'caption': caption,
             'scheduled_time': scheduled_time,
             'username': username,
-            'status': 'scheduled',
-            'cloudinary_public_ids': cloudinary_public_id if isinstance(cloudinary_public_id, list) else [cloudinary_public_id],
+            'cloudinary_public_ids': cloudinary_ids,
+            'is_facebook': is_facebook,
+            'platforms': platforms
         }
-        new_post = save_scheduled_post_to_db(post_data)
-        logger.info(f"Post {new_post.id} scheduled for {scheduled_time} by {username}.")
-        return {'success': True, 'post_id': new_post.id}
+        
+        # Save to database
+        post_id = save_scheduled_post_to_db(post_data)
+        
+        if not post_id:
+            logger.error("Failed to save post to database")
+            return None
+            
+        logger.info(f"Successfully scheduled post with ID: {post_id}")
+        return post_id
+        
     except Exception as e:
-        logger.exception(f"Error scheduling Instagram post: {e}")
-        return {'error': str(e)}
+        logger.error(f"Error scheduling post: {e}")
+        return None
 
 
 def verify_instagram_post(media_id: str, access_token: str, max_retries: int = 3, retry_delay: int = 10) -> bool:
@@ -783,12 +861,10 @@ def monitor_instagram_post_status():
                             error_message="No media ID returned from Instagram"
                         )
 
-                    # Clean up completed task
-                    try:
-                        async_result.forget()
-                        logger.info(f"Cleaned up completed task {post.celery_task_id}")
-                    except Exception as e:
-                        logger.warning(f"Failed to clean up task {post.celery_task_id}: {e}")
+                    # Clean up posted task
+                    if post.celery_task_id:
+                        celery_app.control.revoke(post.celery_task_id, terminate=True)
+                        logger.info(f"Cleaned up posted task {post.celery_task_id}")
 
                 else:
                     error_msg = f"Post {post.id} (Task {post.celery_task_id}) failed: {async_result.result}"
@@ -916,364 +992,588 @@ def validate_video_for_instagram(video_url):
             os.remove(temp_file)
         return False, f"Error validating video: {str(e)}"
 
-@celery_app.task(bind=True, max_retries=5, default_retry_delay=60)
-def _post_media_to_instagram_graph_api(self, post_id: str, media_urls: list, media_type: str, caption: str, username: str):
-    """
-    Internal task to post media to Instagram using the Graph API.
-    Supports:
-    - Single Image posts
-    - Carousel posts (2-20 images)
-    - Reels (video must meet Instagram's requirements):
-        * MP4 container with H.264 codec
-        * AAC audio codec
-        * 9:16 aspect ratio (1080x1920 recommended)
-        * 30fps
-        * 3-90 seconds duration
-        * Maximum file size: 650MB
-        * Minimum resolution: 720p
-    """
-    logger.info(f"Attempting to post media for post {post_id}")
-    db = SessionLocal()
-    
+def verify_facebook_permissions(access_token: str) -> bool:
+    """Verify that the access token has the required permissions for Facebook posting"""
     try:
-        access_token = Config.INSTAGRAM_ACCESS_TOKEN
-        business_account_id = Config.INSTAGRAM_BUSINESS_ACCOUNT_ID
-        graph_api_base = "https://graph.facebook.com/v19.0/"
+        # First check the token permissions
+        response = requests.get(
+            'https://graph.facebook.com/v19.0/me/permissions',
+            params={'access_token': access_token}
+        )
 
-        if not access_token or not business_account_id:
-            raise ValueError("Instagram Graph API Access Token or Business Account ID not configured.")
+        if not response.ok:
+            error_data = response.json()
+            error_message = error_data.get('error', {}).get('message', 'Unknown error')
+            logger.error(f"Failed to verify permissions: {error_message}")
+            logger.error("Please ensure your access token includes all required permissions")
+            return False
 
-        # Handle Reels posting
-        if media_type.lower() == 'reel':
-            # Get the first media URL if it's a list
-            media_url = media_urls[0] if isinstance(media_urls, list) else media_urls
+        permissions = response.json().get('data', [])
+        required_permissions = {
+            'pages_show_list',
+            'pages_read_engagement',
+            'pages_manage_posts',
+            'publish_to_groups',
+            'pages_manage_metadata'  # Added this permission
+        }
+
+        granted_permissions = {
+            perm['permission'] 
+            for perm in permissions 
+            if perm.get('status') == 'granted'
+        }
+
+        missing_permissions = required_permissions - granted_permissions
+        if missing_permissions:
+            logger.error(f"Missing permissions: {', '.join(missing_permissions)}")
+            logger.error("Please ensure you have granted these permissions in your Facebook Developer App")
+            return False
+
+        # Now check page access
+        page_response = requests.get(
+            'https://graph.facebook.com/v19.0/me/accounts',
+            params={'access_token': access_token}
+        )
+
+        if not page_response.ok:
+            error_data = page_response.json()
+            error_message = error_data.get('error', {}).get('message', 'Unknown error')
+            logger.error(f"Failed to verify page access: {error_message}")
+            return False
+
+        pages = page_response.json().get('data', [])
+        target_page = None
+        for page in pages:
+            if page['id'] == Config.FACEBOOK_PAGE_ID:
+                target_page = page
+                break
+
+        if not target_page:
+            logger.error(f"Facebook Page ID {Config.FACEBOOK_PAGE_ID} not found in accessible pages")
+            logger.error("Please ensure:")
+            logger.error("1. The Facebook Page ID is correct")
+            logger.error("2. You have admin access to the Facebook Page")
+            logger.error("3. The page is connected to your Instagram Professional Account")
+            return False
+
+        # Check page permissions
+        required_tasks = {'CREATE_CONTENT', 'MODERATE', 'MANAGE'}
+        page_tasks = set(target_page.get('tasks', []))
+        missing_tasks = required_tasks - page_tasks
+
+        if missing_tasks:
+            logger.error(f"Missing page permissions: {', '.join(missing_tasks)}")
+            logger.error("Please ensure you have the following roles on the Facebook Page:")
+            logger.error("- Admin")
+            logger.error("- Editor")
+            logger.error("Or at minimum, permissions to:")
+            logger.error("- Create content")
+            logger.error("- Moderate content")
+            logger.error("- Manage page settings")
+            return False
+
+        logger.info("Successfully verified all Facebook permissions and page access")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error verifying permissions: {str(e)}")
+        return False
+
+def get_facebook_page_access_token() -> Optional[str]:
+    """Get access token for Facebook posting (uses Instagram access token)"""
+    try:
+        # We use the Instagram access token directly for Facebook
+        if not Config.INSTAGRAM_ACCESS_TOKEN:
+            logger.error("Instagram access token not configured")
+            return None
             
-            # Create container for reel with specific parameters
-            container_payload = {
-                "media_type": "REELS",
-                "video_url": media_url,
-                "caption": caption,
-                "share_to_feed": "true",
-                "access_token": access_token
-            }
+        if not Config.FACEBOOK_PAGE_ID:
+            logger.error("Facebook Page ID not configured")
+            return None
 
-            # Add retry logic for container creation
-            max_retries = 3
-            retry_delay = 5
-            last_error = None
+        # Verify the token has required permissions
+        if not verify_facebook_permissions(Config.INSTAGRAM_ACCESS_TOKEN):
+            logger.error("Token is missing required permissions")
+            return None
 
-            for attempt in range(max_retries):
+        logger.info("Using Instagram access token for Facebook posting")
+        return Config.INSTAGRAM_ACCESS_TOKEN
+
+    except Exception as e:
+        logger.error(f"Error getting access token: {str(e)}")
+        return None
+
+def wait_for_media_ready(creation_id, access_token, max_retries=30, retry_delay=10):
+    """Wait for media to be ready before publishing"""
+    base_url = "https://graph.facebook.com/v18.0"
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(
+                f"{base_url}/{creation_id}",
+                params={
+                    'access_token': access_token,
+                    'fields': 'status_code,status'
+                }
+            )
+            if response.ok:
+                data = response.json()
+                status_code = data.get('status_code')
+                status = data.get('status')
+                
+                logger.info(f"Media status check attempt {attempt + 1}/{max_retries}: status_code={status_code}, status={status}")
+                
+                if status_code == 'FINISHED':
+                    logger.info(f"Media {creation_id} is ready for publishing")
+                    return True
+                elif status_code in ['ERROR', 'EXPIRED']:
+                    logger.error(f"Media {creation_id} failed with status_code={status_code}")
+                    return False
+                elif status_code == 'IN_PROGRESS':
+                    logger.info(f"Media {creation_id} is still processing, waiting {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                    continue
+            else:
+                logger.warning(f"Failed to check media status: {response.text}")
+            
+            # Increase delay for subsequent retries
+            current_delay = retry_delay * (attempt + 1)
+            logger.info(f"Waiting {current_delay} seconds before next attempt...")
+            time.sleep(current_delay)
+        except Exception as e:
+            logger.error(f"Error checking media status: {e}")
+            time.sleep(retry_delay)
+            continue
+    
+    logger.error(f"Media {creation_id} failed to become ready after {max_retries} attempts")
+    return False
+
+def publish_media(creation_id, access_token, account_id, base_url):
+    """Helper function to publish media with retries"""
+    logger.info(f"Attempting to publish media with creation_id: {creation_id}")
+    
+    max_publish_retries = 5
+    for publish_attempt in range(max_publish_retries):
+        try:
+            logger.info(f"Publish attempt {publish_attempt + 1}/{max_publish_retries}")
+            
+            # First check if media is ready
+            status_response = requests.get(
+                f"{base_url}/{creation_id}",
+                params={
+                    'access_token': access_token,
+                    'fields': 'status_code'
+                },
+                timeout=30
+            )
+            
+            if not status_response.ok:
+                logger.warning(f"Failed to check media status: {status_response.text}")
+                if publish_attempt < max_publish_retries - 1:
+                    time.sleep(10)
+                    continue
+                return None
+            
+            status = status_response.json().get('status_code')
+            logger.info(f"Media status before publishing: {status}")
+            
+            if status != 'FINISHED':
+                if publish_attempt < max_publish_retries - 1:
+                    logger.warning(f"Media not ready (status: {status}), waiting before retry")
+                    time.sleep(15)
+                    continue
+                logger.error(f"Media failed to become ready after {max_publish_retries} attempts")
+                return None
+
+            # Media is ready, attempt to publish
+            response = requests.post(
+                f"{base_url}/{account_id}/media_publish",
+                params={
+                    'access_token': access_token,
+                    'creation_id': creation_id
+                },
+                timeout=30
+            )
+            
+            logger.info(f"Publish response status code: {response.status_code}")
+            logger.info(f"Publish response content: {response.text}")
+            
+            if response.ok:
+                logger.info(f"Successfully published media with creation_id: {creation_id}")
+                return response
+            
+            error_data = response.json().get('error', {})
+            error_code = error_data.get('code')
+            
+            # Handle specific error codes
+            if error_code == 9007:  # Media ID is not available
+                if publish_attempt < max_publish_retries - 1:
+                    logger.warning("Media not ready for publishing, waiting longer...")
+                    time.sleep(20)  # Wait longer for media processing
+                    continue
+            
+            logger.warning(f"Failed to publish: {response.text}")
+            if publish_attempt < max_publish_retries - 1:
+                time.sleep(10)
+                continue
+            
+            return response
+            
+        except requests.exceptions.Timeout:
+            logger.warning(f"Timeout during publish attempt {publish_attempt + 1}")
+            if publish_attempt < max_publish_retries - 1:
+                time.sleep(10)
+                continue
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error during publish attempt {publish_attempt + 1}: {str(e)}")
+            if publish_attempt < max_publish_retries - 1:
+                time.sleep(10)
+                continue
+            return None
+    
+    return None
+
+async def post_media_to_facebook(media_urls: List[str], media_type: str, caption: str) -> Tuple[bool, str]:
+    """Post media to Facebook"""
+    try:
+        if media_type == 'carousel':
+            return await post_carousel_to_facebook(media_urls, caption)
+        else:
+            # Get the page access token
+            access_token = Config.INSTAGRAM_ACCESS_TOKEN
+            if not access_token:
+                return False, "Instagram access token not configured"
+
+            # First, get the page access token
+            page_response = requests.get(
+                'https://graph.facebook.com/v19.0/me/accounts',
+                params={'access_token': access_token}
+            )
+
+            if not page_response.ok:
+                error_data = page_response.json()
+                return False, f"Failed to get page access: {error_data.get('error', {}).get('message', 'Unknown error')}"
+
+            pages = page_response.json().get('data', [])
+            page_token = None
+            for page in pages:
+                if page['id'] == Config.FACEBOOK_PAGE_ID:
+                    page_token = page.get('access_token')
+                    break
+
+            if not page_token:
+                return False, f"Could not find access token for page {Config.FACEBOOK_PAGE_ID}"
+
+            # For reels, we need to use chunked upload
+            if media_type == 'reel':
                 try:
-                    logger.info(f"Creating reel container (attempt {attempt + 1})")
+                    # Download video to temporary file
+                    response = requests.get(media_urls[0], stream=True)
+                    response.raise_for_status()
                     
-                    # First, check if the URL is accessible
-                    url_check = requests.head(media_url)
-                    if url_check.status_code != 200:
-                        raise ValueError(f"Video URL is not accessible (status code: {url_check.status_code})")
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_file:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                temp_file.write(chunk)
+                        temp_file_path = temp_file.name
 
-                    # Create the container
-                    container_response = requests.post(
-                        f"{graph_api_base}{business_account_id}/media",
-                        data=container_payload
-                    )
-                    
-                    # Log the full response for debugging
-                    try:
-                        response_data = container_response.json()
-                        logger.info(f"Container creation response: {response_data}")
-                        
-                        if 'error' in response_data:
-                            error_msg = response_data['error'].get('message', 'Unknown error')
-                            error_code = response_data['error'].get('code')
-                            logger.error(f"Error creating container: {error_msg} (Code: {error_code})")
-                            
-                            # Handle specific error codes
-                            if error_code == 2207026:
-                                error_detail = """
-Your video does not meet Instagram's requirements. Please ensure your video meets ALL of these specifications:
+                    # Get video properties
+                    cap = cv2.VideoCapture(temp_file_path)
+                    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    fps = cap.get(cv2.CAP_PROP_FPS)
+                    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    duration = frame_count / fps if fps > 0 else 0
+                    file_size = os.path.getsize(temp_file_path)
+                    cap.release()
 
-Required Format:
-- Container: MP4
-- Video Codec: H.264
-- Audio Codec: AAC
-- Aspect Ratio: 9:16 (1080x1920 recommended)
-- Frame Rate: 30fps
-- Duration: 3-90 seconds
-- Maximum File Size: 650MB
-- Resolution: Minimum 720p
-- Bitrate: Recommended 3500kbps
+                    logger.info(f"Video properties - Width: {width}, Height: {height}, Duration: {duration}s, Size: {file_size} bytes")
 
-You can use tools like Adobe Premiere, Final Cut Pro, or FFmpeg to format your video correctly.
-Example FFmpeg command:
-ffmpeg -i input.mp4 -c:v libx264 -c:a aac -b:a 128k -vf "scale=1080:1920:force_original_aspect_ratio=decrease" -r 30 output.mp4
-"""
-                                logger.error(f"Instagram Error 2207026: {error_detail}")
-                                return {'error': f"Instagram Error 2207026: {error_detail}"}
-                            elif error_code == 190:
-                                raise ValueError("Invalid access token. Please check your credentials.")
-                            else:
-                                raise ValueError(f"Container creation error: {error_msg}")
-                    except json.JSONDecodeError:
-                        logger.warning("Could not parse response as JSON")
-                        logger.info(f"Raw response: {container_response.text}")
-
-                    container_response.raise_for_status()
-                    container_data = response_data
-
-                    if 'id' not in container_data:
-                        raise ValueError("No container ID in response")
-
-                    container_id = container_data['id']
-                    logger.info(f"Successfully created reel container with ID: {container_id}")
-
-                    # Wait for a moment to ensure the container is ready
-                    time.sleep(5)
-
-                    # Publish the container with enhanced error handling
-                    publish_payload = {
-                        "creation_id": container_id,
-                        "access_token": access_token
+                    # Initialize upload session
+                    init_data = {
+                        'access_token': page_token,
+                        'upload_phase': 'start',
+                        'file_size': file_size,
+                        'content_category': 'OTHER'
                     }
 
-                    # Add retry logic for publishing
-                    publish_max_retries = 3
-                    publish_retry_delay = 10
-                    publish_attempt = 0
-                    last_error = None
+                    logger.info("Initializing Facebook reel upload session...")
+                    init_response = requests.post(
+                        f'https://graph.facebook.com/v19.0/{Config.FACEBOOK_PAGE_ID}/videos',
+                        data=init_data
+                    )
                     
-                    while publish_attempt < publish_max_retries:
-                        try:
-                            publish_attempt += 1
-                            logger.info(f"Attempting to publish container (attempt {publish_attempt})")
+                    if not init_response.ok:
+                        error_data = init_response.json()
+                        error_msg = error_data.get('error', {}).get('message', 'Unknown error')
+                        logger.error(f"Failed to initialize upload: {error_msg}")
+                        logger.error(f"Full error response: {error_data}")
+                        return False, f"Failed to initialize upload: {error_msg}"
+                    
+                    response_data = init_response.json()
+                    logger.info(f"Upload session response: {response_data}")
+                    
+                    # Get both video_id and upload_session_id from response
+                    video_id = response_data.get('video_id')
+                    upload_session_id = response_data.get('upload_session_id')
+                    
+                    if not video_id or not upload_session_id:
+                        logger.error(f"Missing required IDs in response: {response_data}")
+                        return False, "Failed to get upload session ID or video ID"
+                    
+                    # Upload video in chunks
+                    chunk_size = 4 * 1024 * 1024  # 4MB chunks
+                    with open(temp_file_path, 'rb') as video_file:
+                        chunk_number = 0
+                        while True:
+                            chunk = video_file.read(chunk_size)
+                            if not chunk:
+                                break
                             
-                            # Check container status before publishing
-                            status_response = requests.get(
-                                f"{graph_api_base}{container_id}",
-                                params={"fields": "status_code,status", "access_token": access_token}
+                            start_offset = chunk_number * chunk_size
+                            logger.debug(f"Uploading chunk {chunk_number}, offset: {start_offset}")
+                            
+                            # Upload chunk
+                            files = {
+                                'video_file_chunk': (
+                                    'chunk',
+                                    chunk,
+                                    'application/octet-stream'
+                                )
+                            }
+                            
+                            chunk_data = {
+                                'access_token': page_token,
+                                'upload_phase': 'transfer',
+                                'start_offset': start_offset,
+                                'upload_session_id': upload_session_id
+                            }
+                            
+                            chunk_response = requests.post(
+                                f'https://graph.facebook.com/v19.0/{Config.FACEBOOK_PAGE_ID}/videos',
+                                data=chunk_data,
+                                files=files
                             )
-                            status_data = status_response.json()
                             
-                            if 'error' in status_data:
-                                raise ValueError(f"Error checking container status: {status_data['error'].get('message')}")
+                            if not chunk_response.ok:
+                                error_data = chunk_response.json()
+                                logger.error(f"Chunk upload failed: {error_data}")
+                                return False, f"Failed to upload chunk {chunk_number}: {error_data.get('error', {}).get('message', 'Unknown error')}"
                             
-                            status = status_data.get('status_code')
-                            if status != 'FINISHED':
-                                logger.warning(f"Container not ready for publishing. Status: {status}")
-                                if publish_attempt < publish_max_retries:
-                                    time.sleep(publish_retry_delay)
-                                    continue
-                                raise ValueError(f"Container failed to process. Final status: {status}")
+                            chunk_number += 1
+                    
+                    # Finish upload with metadata
+                    finish_data = {
+                        'access_token': page_token,
+                        'upload_phase': 'finish',
+                        'upload_session_id': upload_session_id,
+                        'description': caption,
+                        'content_category': 'OTHER'
+                    }
 
-                            # Attempt to publish
-                            publish_response = requests.post(
-                                f"{graph_api_base}{business_account_id}/media_publish",
-                                data=publish_payload
-                            )
-                            
-                            if publish_response.status_code == 400:
-                                error_data = publish_response.json()
-                                error_message = error_data.get('error', {}).get('message', 'Unknown error')
-                                logger.error(f"Publishing failed with 400 error: {error_message}")
-                                
-                                if 'Media ID not found' in error_message or 'not ready' in error_message.lower():
-                                    if publish_attempt < publish_max_retries:
-                                        logger.info(f"Retrying publish after delay ({publish_retry_delay}s)")
-                                        time.sleep(publish_retry_delay)
-                                        continue
-                                
-                                raise ValueError(f"Publishing failed: {error_message}")
-                            
-                            publish_response.raise_for_status()
-                            publish_data = publish_response.json()
-
-                            if 'id' in publish_data:
-                                logger.info(f"Successfully published media with ID: {publish_data['id']}")
-                                return {'success': True, 'media_id': publish_data['id']}
-                            else:
-                                raise ValueError("No media ID in publish response")
-
-                        except (requests.exceptions.RequestException, ValueError) as e:
-                            last_error = e
-                            logger.error(f"Error on publish attempt {publish_attempt}: {str(e)}")
-                            if publish_attempt < publish_max_retries:
-                                time.sleep(publish_retry_delay)
-                                continue
-                            if publish_attempt == publish_max_retries:
-                                raise ValueError(f"Failed to publish media after {publish_max_retries} attempts. Last error: {str(last_error)}")
-
+                    logger.info("Finishing Facebook reel upload...")
+                    finish_response = requests.post(
+                        f'https://graph.facebook.com/v19.0/{Config.FACEBOOK_PAGE_ID}/videos',
+                        data=finish_data
+                    )
+                    
+                    if not finish_response.ok:
+                        error_data = finish_response.json()
+                        logger.error(f"Failed to finish upload: {error_data}")
+                        return False, f"Failed to finish upload: {error_data.get('error', {}).get('message', 'Unknown error')}"
+                    
+                    finish_data = finish_response.json()
+                    logger.info(f"Upload finished successfully: {finish_data}")
+                    
+                    # Clean up temporary file
+                    try:
+                        os.unlink(temp_file_path)
+                    except Exception as e:
+                        logger.warning(f"Failed to delete temporary file: {e}")
+                    
+                    return True, finish_data.get('id')
+                    
                 except requests.exceptions.RequestException as e:
-                    last_error = e
-                    logger.error(f"Request error on attempt {attempt + 1}: {str(e)}")
-                    if attempt < max_retries - 1:
-                        time.sleep(retry_delay)
-                        continue
-                    raise
-                except ValueError as e:
-                    last_error = e
-                    logger.error(f"Value error on attempt {attempt + 1}: {str(e)}")
-                    if attempt < max_retries - 1:
-                        time.sleep(retry_delay)
-                        continue
-                    raise
+                    logger.error(f"Network error during video upload: {e}")
+                    return False, f"Failed to download video: {str(e)}"
                 except Exception as e:
-                    last_error = e
-                    logger.error(f"Unexpected error on attempt {attempt + 1}: {str(e)}")
-                    if attempt < max_retries - 1:
-                        time.sleep(retry_delay)
-                        continue
-                    raise
-
-            # If we get here, all retries failed
-            raise ValueError(f"Failed to create and publish reel after {max_retries} attempts. Last error: {str(last_error)}")
-
-        # Handle Image posting
-        elif media_type.lower() == 'image':
-            media_url = media_urls[0] if isinstance(media_urls, list) else media_urls
-            
-            # Create container for image
-            container_payload = {
-                "media_type": "IMAGE",
-                "image_url": media_url,
-                "caption": caption,
-                "access_token": access_token
-            }
-
-            # Create container
-            container_response = requests.post(
-                f"{graph_api_base}{business_account_id}/media",
-                data=container_payload
-            )
-            container_response.raise_for_status()
-            container_data = container_response.json()
-
-            if 'id' not in container_data:
-                raise ValueError("No container ID in response")
-
-            container_id = container_data['id']
-            logger.info(f"Successfully created image container with ID: {container_id}")
-
-            # Wait for a moment to ensure the container is ready
-            time.sleep(5)
-
-            # Publish the container
-            publish_payload = {
-                "creation_id": container_id,
-                "access_token": access_token
-            }
-
-            publish_response = requests.post(
-                f"{graph_api_base}{business_account_id}/media_publish",
-                data=publish_payload
-            )
-            publish_response.raise_for_status()
-            publish_data = publish_response.json()
-
-            if 'id' in publish_data:
-                logger.info(f"Successfully published image with ID: {publish_data['id']}")
-                return {'success': True, 'media_id': publish_data['id']}
+                    logger.error(f"Unexpected error during video upload: {e}")
+                    return False, f"Error during video upload: {str(e)}"
+                finally:
+                    # Ensure temporary file is deleted
+                    try:
+                        if 'temp_file_path' in locals():
+                            os.unlink(temp_file_path)
+                    except Exception:
+                        pass
             else:
-                raise ValueError("No media ID in publish response")
-
-        # Handle Carousel posting
-        elif media_type.lower() == 'carousel':
-            if not isinstance(media_urls, list):
-                raise ValueError("Carousel posts require a list of media URLs")
-            if len(media_urls) < 2 or len(media_urls) > 20:
-                raise ValueError("Carousel posts must have between 2 and 20 images")
-
-            # Create containers for each image
-            container_ids = []
-            for idx, media_url in enumerate(media_urls, 1):
-                logger.info(f"Creating container for carousel item {idx}")
-                
-                # Create container for each image
-                container_payload = {
-                    "media_type": "IMAGE",
-                    "image_url": media_url,
-                    "is_carousel_item": "true",
-                    "access_token": access_token
+                # For photos, use simple upload
+                post_data = {
+                    'url': media_urls[0],
+                    'caption': caption,
+                    'access_token': page_token
                 }
 
-                container_response = requests.post(
-                    f"{graph_api_base}{business_account_id}/media",
-                    data=container_payload
+                response = requests.post(
+                    f'https://graph.facebook.com/v19.0/{Config.FACEBOOK_PAGE_ID}/photos',
+                    data=post_data
                 )
-                container_response.raise_for_status()
-                container_data = container_response.json()
-                
-                logger.info(f"API Response for item {idx}: {container_data}")
-                
-                if 'id' not in container_data:
-                    raise ValueError(f"No container ID in response for item {idx}")
-                
-                container_ids.append(container_data['id'])
-                logger.info(f"Successfully created container for carousel item {idx} with ID: {container_data['id']}")
-                
-                # Small delay between container creations
-                time.sleep(1)
 
-            # Create the carousel container
-            logger.info(f"Creating carousel container with {len(container_ids)} items")
-            carousel_payload = {
-                "media_type": "CAROUSEL",
-                "caption": caption,
-                "children": ",".join(container_ids),
-                "access_token": access_token
-            }
+                if not response.ok:
+                    error_data = response.json()
+                    return False, f"Failed to post to Facebook: {error_data.get('error', {}).get('message', 'Unknown error')}"
 
-            carousel_response = requests.post(
-                f"{graph_api_base}{business_account_id}/media",
-                data=carousel_payload
-            )
-            carousel_response.raise_for_status()
-            carousel_data = carousel_response.json()
-            
-            logger.info(f"Carousel container response: {carousel_data}")
-            
-            if 'id' not in carousel_data:
-                raise ValueError("No container ID in carousel response")
+                return True, response.json().get('id')
 
-            carousel_container_id = carousel_data['id']
-            logger.info(f"Successfully created carousel container with ID: {carousel_container_id}")
-
-            # Wait for a moment to ensure the container is ready
-            time.sleep(5)
-
-            # Publish the carousel
-            logger.info("Publishing carousel post")
-            publish_payload = {
-                "creation_id": carousel_container_id,
-                "access_token": access_token
-            }
-
-            publish_response = requests.post(
-                f"{graph_api_base}{business_account_id}/media_publish",
-                data=publish_payload
-            )
-            publish_response.raise_for_status()
-            publish_data = publish_response.json()
-            
-            logger.info(f"Successfully published carousel post. Response: {publish_data}")
-
-            if 'id' in publish_data:
-                return {'success': True, 'media_id': publish_data['id']}
-            else:
-                raise ValueError("No media ID in publish response")
-
-        else:
-            raise ValueError(f"Unsupported media_type: {media_type}")
-
-    except requests.exceptions.RequestException as e:
-        error_msg = f"Instagram Graph API request failed: {str(e)}"
-        logger.error(error_msg)
-        try:
-            self.retry(exc=e, countdown=60)
-        except self.MaxRetriesExceededError:
-            return {'error': error_msg + " (Max retries exceeded)"}
     except Exception as e:
-        error_msg = f"Error posting to Instagram: {str(e)}"
-        logger.error(error_msg)
-        return {'error': error_msg}
+        return False, f"Error posting to Facebook: {str(e)}"
+
+async def post_carousel_to_facebook(media_urls: List[str], caption: str) -> Tuple[bool, str]:
+    """Post carousel media to Facebook as individual photos"""
+    try:
+        # Get the page access token
+        access_token = Config.INSTAGRAM_ACCESS_TOKEN
+        if not access_token:
+            return False, "Instagram access token not configured"
+
+        # First, get the page access token
+        page_response = requests.get(
+            'https://graph.facebook.com/v19.0/me/accounts',
+            params={'access_token': access_token}
+        )
+
+        if not page_response.ok:
+            error_data = page_response.json()
+            return False, f"Failed to get page access: {error_data.get('error', {}).get('message', 'Unknown error')}"
+
+        pages = page_response.json().get('data', [])
+        page_token = None
+        for page in pages:
+            if page['id'] == Config.FACEBOOK_PAGE_ID:
+                page_token = page.get('access_token')
+                break
+
+        if not page_token:
+            return False, f"Could not find access token for page {Config.FACEBOOK_PAGE_ID}"
+
+        # Post first image with caption
+        first_post_data = {
+            'url': media_urls[0],
+            'caption': caption,
+            'access_token': page_token
+        }
+        
+        response = requests.post(
+            f'https://graph.facebook.com/v19.0/{Config.FACEBOOK_PAGE_ID}/photos',
+            data=first_post_data
+        )
+        
+        if not response.ok:
+            error_data = response.json()
+            logger.error("Failed to post first image to Facebook: %s", error_data)
+            return False, f"Failed to post to Facebook: {error_data.get('error', {}).get('message', 'Unknown error')}"
+        
+        first_post_id = response.json().get('id')
+        
+        # Post remaining images without caption
+        for media_url in media_urls[1:]:
+            post_data = {
+                'url': media_url,
+                'access_token': page_token
+            }
+            
+            response = requests.post(
+                f'https://graph.facebook.com/v19.0/{Config.FACEBOOK_PAGE_ID}/photos',
+                data=post_data
+            )
+            
+            if not response.ok:
+                logger.warning(f"Failed to post additional image in carousel: {response.json()}")
+                # Continue with remaining images even if one fails
+                continue
+        
+        return True, first_post_id
+        
+    except Exception as e:
+        logger.error("Error posting carousel to Facebook: %s", str(e))
+        return False, f"Error posting carousel to Facebook: {str(e)}"
+
+@celery_app.task
+def _post_media_to_instagram_graph_api(post_id: str, media_urls: List[str], media_type: str, 
+                                     caption: str, username: str, is_facebook: bool = False):
+    """Post media to Instagram/Facebook using the Graph API"""
+    db = SessionLocal()
+    try:
+        post = db.query(ScheduledPost).filter(ScheduledPost.id == post_id).first()
+        if not post:
+            logger.error(f"Post {post_id} not found in database")
+            return
+
+        post.status = 'posting_in_progress'
+        post.posting_attempt_at = datetime.now(timezone.utc)
+        db.commit()
+
+        success = False
+        error_message = None
+        media_id = None
+
+        try:
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            if is_facebook:
+                success, result = loop.run_until_complete(
+                    post_media_to_facebook(media_urls, media_type, caption)
+                )
+            else:
+                # Instagram posting logic
+                if media_type == 'carousel':
+                    success, result = loop.run_until_complete(
+                        post_carousel_to_instagram(media_urls, caption)
+                    )
+                elif media_type == 'reel':
+                    success, result = loop.run_until_complete(
+                        post_reel_to_instagram(media_urls[0], caption)
+                    )
+                else:
+                    success, result = loop.run_until_complete(
+                        post_photo_to_instagram(media_urls[0], caption)
+                    )
+
+            loop.close()
+
+            if success:
+                media_id = result
+            else:
+                error_message = result
+
+        except Exception as e:
+            error_message = str(e)
+            logger.error(f"Error posting to {'Facebook' if is_facebook else 'Instagram'}: {e}")
+
+        # Update post status
+        post.status = 'posted' if success else 'failed'
+        post.error_message = error_message
+        post.media_id = media_id
+        post.updated_at = datetime.now(timezone.utc)
+        db.commit()
+
+        if success and post.cloudinary_public_ids:
+            cleanup_cloudinary_media.delay(post.cloudinary_public_ids)
+
+    except Exception as e:
+        logger.error(f"Error in posting task: {e}")
+        try:
+            post = db.query(ScheduledPost).filter(ScheduledPost.id == post_id).first()
+            if post:
+                post.status = 'failed'
+                post.error_message = str(e)
+                post.updated_at = datetime.now(timezone.utc)
+                db.commit()
+        except Exception as inner_e:
+            logger.error(f"Error updating post status: {inner_e}")
     finally:
         db.close()
 
@@ -1300,151 +1600,343 @@ __all__ = [
 ]
 
 def preprocess_video_for_instagram(video_url):
-    """
-    Preprocesses video to meet Instagram Reels requirements.
-    Returns the path to the processed video file.
-    """
+    """Preprocess video to meet Instagram requirements"""
+    logger.info(f"Preprocessing video from URL: {video_url}")
+    
+    temp_dir = None
+    input_file = None
+    output_file = None
+    
     try:
-        logger.info(f"Starting video preprocessing for URL: {video_url}")
-        
-        # Create temp directory for processing
+        # Create temporary directory
         temp_dir = tempfile.mkdtemp()
         
-        # Download video if it's a URL
-        if video_url.startswith(('http://', 'https://')):
-            input_path = os.path.join(temp_dir, f"input_{uuid.uuid4()}.mp4")
-            response = requests.get(video_url, stream=True)
-            response.raise_for_status()
-            with open(input_path, 'wb') as f:
+        # Download video to temporary file
+        input_file = os.path.join(temp_dir, 'input.mp4')
+        response = requests.get(video_url, stream=True)
+        response.raise_for_status()
+        
+        with open(input_file, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
                         f.write(chunk)
-        else:
-            input_path = video_url
-
-        # Get video info using ffprobe
-        probe_cmd = [
-            'ffprobe', '-v', 'quiet',
-            '-print_format', 'json',
-            '-show_format', '-show_streams',
-            input_path
-        ]
         
-        probe_output = subprocess.check_output(probe_cmd).decode('utf-8')
-        video_info = json.loads(probe_output)
+        # Get video properties
+        cap = cv2.VideoCapture(input_file)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        cap.release()
         
-        # Log original video properties
-        logger.info(f"Original video info: {json.dumps(video_info, indent=2)}")
-        
-        # Get video stream info
-        video_stream = next((s for s in video_info['streams'] if s['codec_type'] == 'video'), None)
-        if not video_stream:
-            raise ValueError("No video stream found")
-            
-        # Calculate target dimensions maintaining aspect ratio
-        width = int(video_stream['width'])
-        height = int(video_stream['height'])
-        
-        # Target 9:16 aspect ratio (1080x1920)
+        # Calculate target dimensions for 9:16 aspect ratio
         target_width = 1080
         target_height = 1920
         
-        # Calculate padding for letterboxing/pillarboxing
-        if (height/width) > (16/9):  # Too tall
-            new_height = int((width * 16) / 9)
-            pad_top = int((height - new_height) / 2)
-            pad_bottom = height - new_height - pad_top
-            pad_left = 0
-            pad_right = 0
-        else:  # Too wide
-            new_width = int((height * 9) / 16)
-            pad_left = int((width - new_width) / 2)
-            pad_right = width - new_width - pad_left
-            pad_top = 0
-            pad_bottom = 0
-            
-        output_path = os.path.join(temp_dir, f"processed_{uuid.uuid4()}.mp4")
+        # Create output filename
+        output_file = os.path.join(temp_dir, 'output.mp4')
         
-        # Construct FFmpeg command for processing
-        ffmpeg_cmd = [
-            'ffmpeg', '-i', input_path,
-            '-vf', f'pad=width={width + pad_left + pad_right}:height={height + pad_top + pad_bottom}:x={pad_left}:y={pad_top}:color=black',
-            '-vf', f'scale={target_width}:{target_height}:force_original_aspect_ratio=decrease',
-            '-c:v', 'libx264',  # H.264 codec
-            '-preset', 'medium',  # Balance between speed and quality
-            '-crf', '23',  # Constant Rate Factor (18-28 is visually lossless)
-            '-c:a', 'aac',  # AAC audio codec
-            '-b:a', '128k',  # Audio bitrate
-            '-r', '30',  # 30fps
-            '-movflags', '+faststart',  # Enable fast start for web playback
-            '-y',  # Overwrite output file if exists
-            output_path
+        # Construct FFmpeg command
+        command = [
+            'ffmpeg',
+            '-i', input_file,
+            '-c:v', 'libx264',  # Use H.264 codec
+            '-c:a', 'aac',      # Use AAC codec
+            '-b:v', '3500k',    # Video bitrate
+            '-b:a', '128k',     # Audio bitrate
+            '-r', '30',         # Frame rate
+            '-vf', f'scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2',
+            '-movflags', '+faststart',
+            '-y',  # Overwrite output file if it exists
+            output_file
         ]
-        
-        logger.info(f"Running FFmpeg command: {' '.join(ffmpeg_cmd)}")
         
         # Run FFmpeg
-        process = subprocess.Popen(
-            ffmpeg_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+        logger.info("Running FFmpeg command...")
+        result = subprocess.run(command, capture_output=True, text=True)
+        
+        if result.returncode != 0:
+            logger.error(f"FFmpeg error: {result.stderr}")
+            return None
+        
+        # Upload processed video to Cloudinary
+        logger.info("Uploading processed video to Cloudinary...")
+        upload_result = cloudinary.uploader.upload_large(
+            output_file,
+            resource_type="video",
+            folder="instagram_posts"
         )
-        stdout, stderr = process.communicate()
         
-        if process.returncode != 0:
-            logger.error(f"FFmpeg error: {stderr.decode()}")
-            raise ValueError(f"FFmpeg processing failed: {stderr.decode()}")
-            
-        # Verify the processed file
-        if not os.path.exists(output_path):
-            raise ValueError("FFmpeg did not create output file")
-            
-        # Get processed video info
-        probe_cmd = [
-            'ffprobe', '-v', 'quiet',
-            '-print_format', 'json',
-            '-show_format', '-show_streams',
-            output_path
-        ]
+        # Clean up temporary files
+        os.remove(input_file)
+        os.remove(output_file)
+        os.rmdir(temp_dir)
         
-        probe_output = subprocess.check_output(probe_cmd).decode('utf-8')
-        processed_info = json.loads(probe_output)
-        logger.info(f"Processed video info: {json.dumps(processed_info, indent=2)}")
+        return upload_result['secure_url']
         
-        # Upload to Cloudinary
-        if CLOUDINARY_CONFIGURED:
-            try:
-                upload_result = cloudinary.uploader.upload(
-                    output_path,
-                    resource_type="video",
-                    folder="instagram_reels"
-                )
-                logger.info(f"Uploaded processed video to Cloudinary: {upload_result['secure_url']}")
-                
-                # Clean up local files
-                os.remove(input_path)
-                os.remove(output_path)
+    except Exception as e:
+        logger.error(f"Error preprocessing video: {str(e)}")
+        return None
+        
+    finally:
+        # Clean up temporary files if they exist
+        try:
+            if input_file and os.path.exists(input_file):
+                os.remove(input_file)
+            if output_file and os.path.exists(output_file):
+                os.remove(output_file)
+            if temp_dir and os.path.exists(temp_dir):
                 os.rmdir(temp_dir)
-                
-                return upload_result['secure_url']
-            except Exception as e:
-                logger.error(f"Cloudinary upload failed: {e}")
-                raise
+        except Exception as e:
+            logger.warning(f"Error cleaning up temporary files: {str(e)}")
+
+def verify_database():
+    """Verify database setup and create tables if they don't exist"""
+    try:
+        # Create engine
+        engine = create_engine('sqlite:///social_media_assistant.db')
+        
+        # Create all tables
+        Base.metadata.create_all(bind=engine)
+        
+        # Verify tables exist
+        inspector = inspect(engine)
+        tables = inspector.get_table_names()
+        logger.info("Database tables: %s", tables)
+        
+        if 'scheduled_posts' in tables:
+            # Get column information
+            columns = inspector.get_columns('scheduled_posts')
+            logger.info("Scheduled posts table columns: %s", 
+                       [f"{col['name']} ({col['type']})" for col in columns])
+            return True
         else:
-            logger.warning("Cloudinary not configured, returning local file path")
-            return output_path
+            logger.error("scheduled_posts table not found in database")
+            return False
             
     except Exception as e:
-        logger.error(f"Video preprocessing failed: {e}")
-        # Clean up any remaining temporary files
-        if 'temp_dir' in locals() and os.path.exists(temp_dir):
-            for file in os.listdir(temp_dir):
-                try:
-                    os.remove(os.path.join(temp_dir, file))
-                except:
-                    pass
+        logger.error("Error verifying database: %s", str(e), exc_info=True)
+        return False
+
+# Call verify_database when module is imported
+verify_database()
+
+async def post_photo_to_instagram(media_url: str, caption: str) -> Tuple[bool, str]:
+    """Post a single photo to Instagram"""
+    try:
+        # Get Instagram account ID
+        instagram_account_id = get_instagram_account_id()
+        if not instagram_account_id:
+            return False, "Failed to get Instagram account ID"
+
+        # Create container
+        container_response = requests.post(
+            f'https://graph.facebook.com/v19.0/{instagram_account_id}/media',
+            params={
+                'access_token': Config.INSTAGRAM_ACCESS_TOKEN,
+                'image_url': media_url,
+                'caption': caption
+            }
+        )
+
+        if not container_response.ok:
+            error_data = container_response.json()
+            return False, f"Failed to create media container: {error_data.get('error', {}).get('message', 'Unknown error')}"
+
+        container_id = container_response.json().get('id')
+
+        # Publish the container
+        publish_response = requests.post(
+            f'https://graph.facebook.com/v19.0/{instagram_account_id}/media_publish',
+            params={
+                'access_token': Config.INSTAGRAM_ACCESS_TOKEN,
+                'creation_id': container_id
+            }
+        )
+
+        if not publish_response.ok:
+            error_data = publish_response.json()
+            return False, f"Failed to publish media: {error_data.get('error', {}).get('message', 'Unknown error')}"
+
+        return True, publish_response.json().get('id')
+
+    except Exception as e:
+        return False, f"Error posting photo to Instagram: {str(e)}"
+
+async def post_carousel_to_instagram(media_urls: List[str], caption: str) -> Tuple[bool, str]:
+    """Post carousel media to Instagram"""
+    try:
+        instagram_account_id = get_instagram_account_id()
+        if not instagram_account_id:
+            return False, "Failed to get Instagram account ID"
+
+        # Create containers for each media
+        children = []
+        for media_url in media_urls:
             try:
-                os.rmdir(temp_dir)
-            except:
-                pass
-        raise
+                container_response = requests.post(
+                    f'https://graph.facebook.com/v19.0/{instagram_account_id}/media',
+                    params={
+                        'access_token': Config.INSTAGRAM_ACCESS_TOKEN,
+                        'image_url': media_url,
+                        'is_carousel_item': 'true'
+                    }
+                )
+
+                if not container_response.ok:
+                    error_data = container_response.json()
+                    return False, f"Failed to create media container: {error_data.get('error', {}).get('message', 'Unknown error')}"
+
+                children.append(container_response.json().get('id'))
+            except Exception as e:
+                return False, f"Error creating carousel item: {str(e)}"
+
+        # Create carousel container
+        carousel_response = requests.post(
+            f'https://graph.facebook.com/v19.0/{instagram_account_id}/media',
+            params={
+                'access_token': Config.INSTAGRAM_ACCESS_TOKEN,
+                'media_type': 'CAROUSEL',
+                'caption': caption,
+                'children': ','.join(children)
+            }
+        )
+
+        if not carousel_response.ok:
+            error_data = carousel_response.json()
+            return False, f"Failed to create carousel container: {error_data.get('error', {}).get('message', 'Unknown error')}"
+
+        carousel_container_id = carousel_response.json().get('id')
+
+        # Publish the carousel
+        response = requests.post(
+            f'https://graph.facebook.com/v19.0/{instagram_account_id}/media_publish',
+            params={
+                'access_token': Config.INSTAGRAM_ACCESS_TOKEN,
+                'creation_id': carousel_container_id
+            }
+        )
+
+        if not response.ok:
+            error_data = response.json()
+            return False, f"Failed to publish carousel: {error_data.get('error', {}).get('message', 'Unknown error')}"
+
+        return True, response.json().get('id')
+
+    except Exception as e:
+        return False, f"Error posting carousel to Instagram: {str(e)}"
+
+async def post_reel_to_instagram(media_url: str, caption: str) -> Tuple[bool, str]:
+    """Post a reel to Instagram"""
+    try:
+        instagram_account_id = get_instagram_account_id()
+        if not instagram_account_id:
+            return False, "Failed to get Instagram account ID"
+
+        # Create container for reel
+        container_response = requests.post(
+            f'https://graph.facebook.com/v19.0/{instagram_account_id}/media',
+            params={
+                'access_token': Config.INSTAGRAM_ACCESS_TOKEN,
+                'media_type': 'REELS',
+                'video_url': media_url,
+                'caption': caption
+            }
+        )
+
+        if not container_response.ok:
+            error_data = container_response.json()
+            return False, f"Failed to create reel container: {error_data.get('error', {}).get('message', 'Unknown error')}"
+
+        container_id = container_response.json().get('id')
+
+        # Check status and wait for video processing
+        max_attempts = 10
+        attempt = 0
+        while attempt < max_attempts:
+            try:
+                status_response = requests.get(
+                    f'https://graph.facebook.com/v19.0/{container_id}',
+                    params={'access_token': Config.INSTAGRAM_ACCESS_TOKEN, 'fields': 'status_code'}
+                )
+
+                if not status_response.ok:
+                    error_data = status_response.json()
+                    return False, f"Failed to check reel status: {error_data.get('error', {}).get('message', 'Unknown error')}"
+
+                status = status_response.json().get('status_code')
+                if status == 'FINISHED':
+                    break
+                elif status in ['ERROR', 'EXPIRED']:
+                    return False, f"Reel processing failed with status: {status}"
+
+                await asyncio.sleep(5)  # Wait 5 seconds before checking again
+                attempt += 1
+            except Exception as e:
+                logger.error(f"Error checking reel status: {e}")
+                await asyncio.sleep(5)
+                attempt += 1
+                continue
+
+        if attempt >= max_attempts:
+            return False, "Timeout waiting for reel processing"
+
+        # Publish the reel
+        response = requests.post(
+            f'https://graph.facebook.com/v19.0/{instagram_account_id}/media_publish',
+            params={
+                'access_token': Config.INSTAGRAM_ACCESS_TOKEN,
+                'creation_id': container_id
+            }
+        )
+
+        if not response.ok:
+            error_data = response.json()
+            return False, f"Failed to publish reel: {error_data.get('error', {}).get('message', 'Unknown error')}"
+
+        return True, response.json().get('id')
+            
+    except Exception as e:
+        return False, f"Error posting reel to Instagram: {str(e)}"
+
+@celery_app.task
+def cleanup_cloudinary_media(public_ids: List[str]):
+    """Clean up media files from Cloudinary"""
+    try:
+        if not CLOUDINARY_CONFIGURED:
+            logger.warning("Cloudinary not configured, skipping media cleanup")
+            return
+            
+        for public_id in public_ids:
+            try:
+                result = cloudinary.uploader.destroy(public_id)
+                if result.get('result') == 'ok':
+                    logger.info(f"Successfully deleted media {public_id} from Cloudinary")
+                else:
+                    logger.warning(f"Failed to delete media {public_id} from Cloudinary: {result}")
+            except Exception as e:
+                logger.error(f"Error deleting media {public_id} from Cloudinary: {e}")
+                continue
+                
+    except Exception as e:
+        logger.error(f"Error cleaning up Cloudinary media: {e}")
+
+def get_instagram_account_id() -> Optional[str]:
+    """Get Instagram account ID from Facebook Page ID"""
+    try:
+        response = requests.get(
+            f'https://graph.facebook.com/v19.0/{Config.FACEBOOK_PAGE_ID}',
+            params={
+                'access_token': Config.INSTAGRAM_ACCESS_TOKEN,
+                'fields': 'instagram_business_account'
+            }
+        )
+
+        if not response.ok:
+            logger.error("Failed to get Instagram account ID: %s", response.json())
+            return None
+
+        data = response.json()
+        return data.get('instagram_business_account', {}).get('id')
+
+    except Exception as e:
+        logger.error("Error getting Instagram account ID: %s", str(e))
+        return None
