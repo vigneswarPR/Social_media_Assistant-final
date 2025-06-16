@@ -226,6 +226,20 @@ class InstagramAnalytics:
                 
                 engagement = likes + comments + saved
                 engagement_rate = round((engagement / reach) * 100, 2)
+
+                # Get the permalink URL for the media
+                permalink_url = None
+                try:
+                    media_url = f"{self.base_url}/{item['id']}"
+                    params = {
+                        'fields': 'permalink',
+                        'access_token': self.access_token
+                    }
+                    media_data = self._make_request(media_url, params)
+                    if media_data and 'permalink' in media_data:
+                        permalink_url = media_data['permalink']
+                except Exception as e:
+                    logger.error(f"Error getting permalink for media {item.get('id')}: {e}")
                 
                 return {
                     'media_id': item['id'],
@@ -236,7 +250,8 @@ class InstagramAnalytics:
                     'impressions': metrics.get('impressions', 0),
                     'likes': likes,
                     'comments': comments,
-                    'saved': saved
+                    'saved': saved,
+                    'permalink_url': permalink_url
                 }
         except Exception as e:
             logger.error(f"Error processing media {item.get('id')}: {e}")
