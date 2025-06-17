@@ -312,9 +312,13 @@ if page == "Post Scheduler":
                         
                         # Preview the uploaded media
                         if detected_media_type == "image" or detected_media_type == "carousel":
-                            st.image(upload_result['secure_url'], caption=f"Image {idx + 1}", use_column_width=True)
+                            col1, col2, col3 = st.columns([1,2,1])
+                            with col2:
+                                st.image(upload_result['secure_url'], caption=f"Image {idx + 1}", width=400)
                         else:
-                            st.video(upload_result['secure_url'])
+                            col1, col2, col3 = st.columns([1,2,1])
+                            with col2:
+                                st.video(upload_result['secure_url'], format="video/mp4", start_time=0)
 
                 except Exception as e:
                     st.error(f"Error uploading file {uploaded_file.name}: {str(e)}")
@@ -382,8 +386,8 @@ if page == "Post Scheduler":
         st.session_state['selected_caption_text'] = st.text_area("Edit Caption", value=selected_caption, height=150)
 
     if st.session_state['selected_caption_text']:
-        st.header("4. Schedule Post")
-        col1, col2 = st.columns(2)
+        st.header("4. Schedule Your Post")
+        st.write("Choose when to publish your content")
         
         # Get current time in IST using pytz
         IST = pytz.timezone('Asia/Kolkata')
@@ -395,92 +399,138 @@ if page == "Post Scheduler":
         if 'schedule_time' not in st.session_state:
             st.session_state['schedule_time'] = current_time_ist.time()
         
-        # Use session state for date and time, updating only when user changes them
-        schedule_date = col1.date_input(
-            "Post Date",
-            value=st.session_state['schedule_date'],
-            key='date_input'
-        )
-        schedule_time = col2.time_input(
-            "Post Time",
-            value=st.session_state['schedule_time'],
-            key='time_input'
-        )
+        col1, col2 = st.columns(2)
+        with col1:
+            schedule_date = st.date_input(
+                "Select Date",
+                value=st.session_state['schedule_date'],
+                key='schedule_date_input',
+                min_value=current_time_ist.date()  # Set minimum date to today
+            )
+        
+        with col2:
+            schedule_time = st.time_input(
+                "Select Time",
+                value=st.session_state['schedule_time'],
+                key='schedule_time_input'
+            )
         
         # Update session state with new values
         st.session_state['schedule_date'] = schedule_date
         st.session_state['schedule_time'] = schedule_time
         
-        # Add timezone info
-        st.info("⏰ All times are in Indian Standard Time (IST / UTC+5:30)")
-        
-        post_now = st.checkbox("Post immediately")
-        
-        if st.button("Schedule Post"):
-            try:
-                # Ensure we have both media URLs and Cloudinary public IDs
-                if not st.session_state.get('uploaded_media_path') or not st.session_state.get('cloudinary_public_id'):
-                    st.error("❌ Missing media information. Please upload your media files first.")
-                    st.stop()
+        # Create datetime objects for comparison
+        selected_datetime = datetime.combine(schedule_date, schedule_time)
+        selected_datetime = IST.localize(selected_datetime)
+        current_datetime = datetime.now(IST)
 
-                # Convert to lists if not already
-                media_urls = st.session_state['uploaded_media_path']
-                cloudinary_ids = st.session_state['cloudinary_public_id']
+        # Calculate time difference in minutes
+        time_difference = (selected_datetime - current_datetime).total_seconds() / 60
+
+        # Only show warning if selected time is more than 3 minutes in the past
+        is_past_time = time_difference < -3  # Consider times more than 3 minutes in the past as "past"
+        
+        if is_past_time:
+            st.error("""
+                ⚠️ Selected time has already passed
                 
-                if not isinstance(media_urls, list):
-                    media_urls = [media_urls]
-                if not isinstance(cloudinary_ids, list):
-                    cloudinary_ids = [cloudinary_ids]
+                Please select a future time for scheduling your post
+            """)
+            st.write(f"Current time (IST): {current_datetime.strftime('%Y-%m-%d %I:%M:%S %p')}")
+        
+        # Show current time and selected time for reference
+        st.info(f"""
+            📅 Scheduling Details:
+            - Current Time (IST): {current_datetime.strftime('%Y-%m-%d %I:%M:%S %p')}
+            - Selected Time (IST): {selected_datetime.strftime('%Y-%m-%d %I:%M:%S %p')}
+            
+            ⏰ All times are in Indian Standard Time (IST / UTC+5:30)
+        """)
+        
+        post_now = st.checkbox("Post immediately", key="post_now_checkbox")
+        
+        # Disable the schedule button if time is in the past and not posting immediately
+        schedule_button_disabled = is_past_time and not post_now
+        
+        if not schedule_button_disabled:
+            if st.button("Schedule Post", key="schedule_post_button", type="primary", use_container_width=True):
+                try:
+                    # Ensure we have both media URLs and Cloudinary public IDs
+                    if not st.session_state.get('uploaded_media_path') or not st.session_state.get('cloudinary_public_id'):
+                        st.error("❌ Missing media information. Please upload your media files first.")
+                        st.stop()
 
-                # Convert local schedule time to UTC for storage
-                if post_now:
-                    scheduled_datetime = datetime.now(timezone.utc)
-                    local_dt_ist = datetime.now(IST)
-                else:
-                    # Combine date and time into a datetime object
-                    scheduled_datetime = datetime.combine(schedule_date, schedule_time)
-                    # Add timezone info (IST) and convert to UTC
-                    scheduled_datetime = IST.localize(scheduled_datetime).astimezone(timezone.utc)
-                    local_dt_ist = IST.localize(datetime.combine(schedule_date, schedule_time))
-
-                # Determine target platforms
-                if platform == "Both":
-                    platforms = ["Instagram", "Facebook"]
-                    platform_display = "Both"
-                else:
-                    platforms = [platform]
-                    platform_display = platform
-
-                # Schedule posts for each selected platform
-                for target_platform in platforms:
-                    is_facebook = target_platform == "Facebook"
+                    # Convert to lists if not already
+                    media_urls = st.session_state['uploaded_media_path']
+                    cloudinary_ids = st.session_state['cloudinary_public_id']
                     
-                    # Schedule the post with kwargs
-                    task_kwargs = {
-                        'media_url': media_urls,
-                        'media_type': st.session_state['current_media_type'],
-                        'caption': st.session_state['selected_caption_text'],
-                        'scheduled_time_str': scheduled_datetime.isoformat(),
-                        'username': Config.INSTAGRAM_USERNAME,
-                        'cloudinary_public_id': cloudinary_ids,
-                        'is_facebook': is_facebook
-                    }
-                    
-                    result = schedule_instagram_post.delay(**task_kwargs)
+                    if not isinstance(media_urls, list):
+                        media_urls = [media_urls]
+                    if not isinstance(cloudinary_ids, list):
+                        cloudinary_ids = [cloudinary_ids]
 
-                    if result.id:
-                        st.success(f"✅ Post scheduled successfully for {target_platform}!")
-                        st.info(f"🕒 Scheduled for {local_dt_ist.strftime('%Y-%m-%d %I:%M %p')} IST")
-                else:
-                        st.error(f"❌ Failed to schedule post for {target_platform}. Please try again.")
+                    # Convert local schedule time to UTC for storage
+                    if post_now:
+                        scheduled_datetime = datetime.now(timezone.utc)
+                        local_dt_ist = datetime.now(IST)
+                    else:
+                        # One final check before scheduling
+                        if is_past_time:
+                            st.error("Cannot schedule posts in the past. Please select a future time.")
+                            st.stop()
+                        
+                        # Use the selected datetime for scheduling
+                        scheduled_datetime = selected_datetime.astimezone(timezone.utc)
+                        local_dt_ist = selected_datetime
 
-                # Clear the form
-                st.session_state['uploaded_media_path'] = None
-                st.session_state['cloudinary_public_id'] = None
-                st.rerun()
+                    # Determine target platforms
+                    if platform == "Both":
+                        platforms = ["Instagram", "Facebook"]
+                        platform_display = "Both"
+                    else:
+                        platforms = [platform]
+                        platform_display = platform
 
-            except Exception as e:
-                st.error(f"❌ Error scheduling post: {str(e)}")
+                    # Schedule posts for each selected platform
+                    success_count = 0
+                    for target_platform in platforms:
+                        is_facebook = target_platform == "Facebook"
+                        
+                        # Schedule the post with kwargs
+                        task_kwargs = {
+                            'media_url': media_urls,
+                            'media_type': st.session_state['current_media_type'],
+                            'caption': st.session_state['selected_caption_text'],
+                            'scheduled_time_str': scheduled_datetime.isoformat(),
+                            'username': Config.INSTAGRAM_USERNAME,
+                            'cloudinary_public_id': cloudinary_ids,
+                            'is_facebook': is_facebook
+                        }
+                        
+                        result = schedule_instagram_post.delay(**task_kwargs)
+
+                        if result.id:
+                            success_count += 1
+                            st.success(f"✅ Post scheduled successfully for {target_platform}!")
+                            st.info(f"🕒 Scheduled for {local_dt_ist.strftime('%Y-%m-%d %I:%M %p')} IST")
+
+                    # Only clear form and rerun if all posts were scheduled successfully
+                    if success_count == len(platforms):
+                        # Clear the form
+                        st.session_state['uploaded_media_path'] = None
+                        st.session_state['cloudinary_public_id'] = None
+                        st.rerun()
+
+                except Exception as e:
+                    st.error(f"""
+                        <div style='display: flex; align-items: center; gap: 0.5rem;'>
+                            <span style='font-size: 1.2rem;'>❌</span>
+                            <div>
+                                <p style='margin: 0; font-weight: 600;'>Error scheduling post</p>
+                                <p style='margin: 0; color: var(--text-light); font-size: 0.9rem;'>{str(e)}</p>
+                            </div>
+                        </div>
+                    """, unsafe_allow_html=True)
 
 # Add logic for "Content Calendar" and "Scheduled Posts" pages here as needed
 
